@@ -24,11 +24,11 @@ export class songRequest extends plugin {
             priority: 300,
             rule: [
                 {
-                    reg: '^#点歌|#听[1-9][0-9]*|#听[1-9]*$',
+                    reg: '^#点歌\s*|#听[1-9][0-9]*|#听[1-9]*$',
                     fnc: 'pickSong'
                 },
                 {
-                    reg: "^#播放(.*)",
+                    reg: "^#播放\s*(.*)",
                     fnc: "playSong"
                 },
                 {
@@ -41,7 +41,7 @@ export class songRequest extends plugin {
                     permission: 'master'
                 },
                 {
-                    reg: '^#?云盘更新|#?更新云盘$',
+                    reg: '^#?云盘更新$|#?更新云盘$',
                     fnc: 'songCloudUpdate',
                     permission: 'master'
                 },
@@ -63,7 +63,12 @@ export class songRequest extends plugin {
             ]
         });
         this.toolsConfig = config.getConfig("tools");
-        // 加载网易云Cookie
+
+        // Cookie配置策略：点歌和云盘分离
+        this.neteaseSongCookie = this.toolsConfig.neteaseCookie || this.toolsConfig.neteaseCookie
+        this.neteaseCloudCookie = this.toolsConfig.neteaseCloudCookie || this.toolsConfig.neteaseCookie
+
+        // 保持向后兼容的原有Cookie（作为fallback）
         this.neteaseCookie = this.toolsConfig.neteaseCookie
         // 加载是否转化群语音
         this.isSendVocal = this.toolsConfig.isSendVocal
@@ -102,8 +107,10 @@ export class songRequest extends plugin {
         let musicDate = { 'group_id': group_id, data: [] }
         // 获取搜索歌曲列表信息
         let detailUrl = autoSelectNeteaseApi + "/song/detail?ids={}&time=" + Date.now() //歌曲详情API
-        if (e.msg.replace(/\s+/g, "").match(/点歌(.+)/)) {
-            const songKeyWord = e.msg.replace(/\s+/g, "").match(/点歌(.+)/)[1].replace(/[^\w\u4e00-\u9fa5]/g, '')
+        if (e.msg.match(/^#点歌\s*(.+)/)) {
+            const songKeyWord = e.msg.match(/^#点歌\s*(.+)/)[1];
+            //if (e.msg.replace(/\s+/g, "").match(/点歌(.+)/)) {
+            //const songKeyWord = e.msg.replace(/\s+/g, "").match(/点歌(.+)/)[1].replace(/[^\w\u4e00-\u9fa5]/g, '')
             // 获取云盘歌单列表
             const cloudSongList = await this.getCloudSong()
             // 搜索云盘歌单并进行搜索
@@ -121,8 +128,8 @@ export class songRequest extends plugin {
                     'duration': matchedSongs[i].duration
                 });
             }
-            let searchUrl = autoSelectNeteaseApi + '/search?keywords={}&limit=' + searchCount//搜索API
-            searchUrl = searchUrl.replace("{}", songKeyWord)
+            let searchUrl = autoSelectNeteaseApi + '/search?keywords={}&limit=' + searchCount //搜索API
+            searchUrl = searchUrl.replace("{}", encodeURIComponent(songKeyWord))
             await axios.get(searchUrl, {
                 headers: {
                     "User-Agent": COMMON_USER_AGENT
@@ -142,18 +149,24 @@ export class songRequest extends plugin {
                         logger.info('并未获取云服务歌曲')
                     }
                     const ids = musicDate.data.map(item => item.id).join(',');
-                    detailUrl = detailUrl.replace("{}", ids)
+                    detailUrl = detailUrl.replace("{}", ids);
                     await axios.get(detailUrl, {
                         headers: {
                             "User-Agent": COMMON_USER_AGENT
                         },
                     }).then(res => {
-                        let imgList = {}
-                        for (let i = 0; i < res.data.songs.length; i++) {
-                            if (res.data.songs[i].al.picUrl.includes('109951169484091680.jpg')) {
-                                imgList[res.data.songs[i].id] = 'def'
+                        let imgList = {};
+                        for (const songDetail of res.data.songs) {
+                            const songId = songDetail.id;
+                            if (songDetail.al.picUrl.includes('109951169484091680.jpg')) {
+                                imgList[songId] = 'def';
                             } else {
-                                imgList[res.data.songs[i].id] = res.data.songs[i].al.picUrl;
+                                imgList[songId] = songDetail.al.picUrl;
+                            }
+                            const musicDataIndex = musicDate.data.findIndex(item => item.id === songId);
+                            if (musicDataIndex !== -1) {
+                                musicDate.data[musicDataIndex].songName = songDetail.name;
+                                musicDate.data[musicDataIndex].singerName = songDetail.ar[0]?.name;
                             }
                         }
                         for (let i = 0; i < musicDate.data.length; i++) {
@@ -162,7 +175,7 @@ export class songRequest extends plugin {
                                 musicDate.data[i].cover = imgList[songId];
                             }
                         }
-                    })
+                    });
                     if (saveId == -1) {
                         songInfo.push(musicDate)
                     } else {
@@ -172,10 +185,11 @@ export class songRequest extends plugin {
                     const data = await new PickSongList(e).getData(musicDate.data)
                     let img = await puppeteer.screenshot("pick-song", data);
                     e.reply(img);
+
                 } else {
                     e.reply('暂未找到你想听的歌哦~')
                 }
-            })
+            });
         } else if (await redisGetKey(REDIS_YUNZAI_SONGINFO) != []) {
             if (e.msg.replace(/\s+/g, "").match(/^#听(\d+)/)) {
                 const pickNumber = e.msg.replace(/\s+/g, "").match(/^#听(\d+)/)[1] - 1
@@ -183,16 +197,20 @@ export class songRequest extends plugin {
                 if (!group_id) return
                 let songInfo = await redisGetKey(REDIS_YUNZAI_SONGINFO)
                 const saveId = songInfo.findIndex(item => item.group_id === e.group_id)
+                const selectedSong = songInfo[saveId].data[pickNumber];
+                const songId = selectedSong.id;
                 const AUTO_NETEASE_SONG_DOWNLOAD = autoSelectNeteaseApi + "/song/url/v1?id={}&level=" + this.neteaseCloudAudioQuality;
-                const pickSongUrl = AUTO_NETEASE_SONG_DOWNLOAD.replace("{}", songInfo[saveId].data[pickNumber].id)
-                const songWikiUrl = autoSelectNeteaseApi + '/song/wiki/summary?id=' + songInfo[saveId].data[pickNumber].id
-                const statusUrl = autoSelectNeteaseApi + '/login/status' //用户状态API
-                const isCkExpired = await this.checkCooike(statusUrl)
-                // // 请求netease数据
-                this.neteasePlay(e, pickSongUrl, songWikiUrl, songInfo[saveId].data, pickNumber, isCkExpired)
+                const pickSongUrl = AUTO_NETEASE_SONG_DOWNLOAD.replace("{}", songId);
+                const songWikiUrl = autoSelectNeteaseApi + '/song/wiki/summary?id=' + songId;
+                const statusUrl = autoSelectNeteaseApi + '/login/status'; //用户状态API
+                // 判断选中的歌曲是否来自云盘
+                const isCloudSong = selectedSong.duration === '云盘';
+                // 检查 Cookie 有效性，根据歌曲来源选择 Cookie 类型
+                const isCkExpired = await this.checkCooike(statusUrl, isCloudSong ? 'cloud' : 'song');
+                // 请求netease数据并播放
+                this.neteasePlay(e, pickSongUrl, songWikiUrl, songInfo[saveId].data, pickNumber, isCkExpired, isCloudSong);
             }
         }
-
     }
 
     // 播放策略
@@ -210,9 +228,9 @@ export class songRequest extends plugin {
         const AUTO_NETEASE_SONG_DOWNLOAD = autoSelectNeteaseApi + "/song/url/v1?id={}&level=" + this.neteaseCloudAudioQuality;
         let searchUrl = autoSelectNeteaseApi + '/search?keywords={}&limit=1' //搜索API
         let detailUrl = autoSelectNeteaseApi + "/song/detail?ids={}" //歌曲详情API
-        if (e.msg.replace(/\s+/g, "").match(/播放(.+)/)) {
-            const songKeyWord = e.msg.replace(/\s+/g, "").match(/播放(.+)/)[1]
-            searchUrl = searchUrl.replace("{}", songKeyWord)
+        if (e.msg.match(/^#播放\s*(.+)/)) {
+            const songKeyWord = e.msg.match(/^#播放\s*(.+)/)[1]
+            searchUrl = searchUrl.replace("{}", encodeURIComponent(songKeyWord))
             await axios.get(searchUrl, {
                 headers: {
                     "User-Agent": COMMON_USER_AGENT
@@ -241,8 +259,9 @@ export class songRequest extends plugin {
                     const pickSongUrl = AUTO_NETEASE_SONG_DOWNLOAD.replace("{}", songInfo[0].id)
                     const statusUrl = autoSelectNeteaseApi + '/login/status' //用户状态API
                     const songWikiUrl = autoSelectNeteaseApi + '/song/wiki/summary?id=' + songInfo[0].id
-                    const isCkExpired = await this.checkCooike(statusUrl)
-                    this.neteasePlay(e, pickSongUrl, songWikiUrl, songInfo, 0, isCkExpired)
+                    const isCkExpired = await this.checkCooike(statusUrl, 'song')
+                    // 在playSong方法中，网易云搜索的歌曲不是云盘歌曲
+                    this.neteasePlay(e, pickSongUrl, songWikiUrl, songInfo, 0, isCkExpired, false)
                 } else {
                     e.reply('暂未找到你想听的歌哦~')
                 }
@@ -255,11 +274,10 @@ export class songRequest extends plugin {
     async myCloud(e) {
         const autoSelectNeteaseApi = await this.pickApi()
         const cloudUrl = autoSelectNeteaseApi + '/user/cloud'
-        // 云盘数据API
         await axios.get(cloudUrl, {
             headers: {
                 "User-Agent": COMMON_USER_AGENT,
-                "Cookie": this.neteaseCookie
+                "Cookie": this.neteaseCloudCookie  // 使用云盘CK
             },
         }).then(res => {
             const cloudData = {
@@ -333,7 +351,7 @@ export class songRequest extends plugin {
             formData.append('songFile', fs.createReadStream(path));
             const headers = {
                 ...formData.getHeaders(),
-                'Cookie': this.neteaseCookie,
+                'Cookie': this.neteaseCloudCookie,  // 使用云盘CK
             };
             const updateUrl = `${autoSelectNeteaseApi}/cloud?time=${Date.now()}`;
             try {
@@ -349,7 +367,7 @@ export class songRequest extends plugin {
                         const matchRes = await axios.get(matchUrl, {
                             headers: {
                                 "User-Agent": COMMON_USER_AGENT,
-                                "Cookie": this.neteaseCookie
+                                "Cookie": this.neteaseCloudCookie  // 使用云盘CK
                             },
                         });
                         logger.info('歌曲信息匹配成功');
@@ -358,7 +376,6 @@ export class songRequest extends plugin {
                     }
                     this.songCloudUpdate(e);
                     return res;
-
                 } else {
                     throw new Error('上传失败，响应不正确');
                 }
@@ -383,7 +400,7 @@ export class songRequest extends plugin {
                     const res = await axios.get(cloudUrl, {
                         headers: {
                             "User-Agent": COMMON_USER_AGENT,
-                            "Cookie": this.neteaseCookie
+                            "Cookie": this.neteaseCloudCookie  // 使用云盘CK
                         }
                     });
                     const songs = res.data.data.map(({ songId, songName, artist }) => ({
@@ -467,7 +484,7 @@ export class songRequest extends plugin {
             await formData.append('songFile', fs.createReadStream(newFileName))
             const headers = {
                 ...formData.getHeaders(),
-                'Cookie': this.neteaseCookie,
+                'Cookie': this.neteaseCloudCookie,  // 使用云盘CK
             };
             const updateUrl = autoSelectNeteaseApi + `/cloud?time=${Date.now()}`
             try {
@@ -479,7 +496,6 @@ export class songRequest extends plugin {
                 });
                 this.songCloudUpdate(e);
                 return res;
-
             } catch (error) {
                 throw error;
             }
@@ -521,34 +537,40 @@ export class songRequest extends plugin {
         }
     }
 
-    // 检测cooike活性
-    async checkCooike(statusUrl) {
+    // 修改检查Cookie方法，支持指定Cookie类型
+    async checkCooike(statusUrl, cookieType = 'song') {
+        const cookie = cookieType === 'cloud' ? this.neteaseCloudCookie : this.neteaseSongCookie
         let status
         await axios.get(statusUrl, {
             headers: {
                 "User-Agent": COMMON_USER_AGENT,
-                "Cookie": this.neteaseCookie
+                "Cookie": cookie
             },
         }).then(async res => {
             const userInfo = res.data.data.profile
-            await config.updateField("tools", "neteaseUserId", res.data.data.profile.userId);
+            if (cookieType === 'song') {
+                await config.updateField("tools", "neteaseUserId", res.data.data.profile.userId);
+            }
             if (userInfo) {
-                logger.info('[R插件][ncm-Cookie检测]ck活着，使用ck进行高音质下载')
+                logger.info(`[R插件][ncm-Cookie检测][${cookieType}]ck活着，使用ck进行高音质下载`)
                 status = true
             } else {
-                logger.info('[R插件][ncm-Cookie检测]ck失效，将启用临时接口下载')
+                logger.info(`[R插件][ncm-Cookie检测][${cookieType}]ck失效，将启用临时接口下载`)
                 status = false
             }
         })
         return status
     }
 
-    // 网易云音乐下载策略
-    neteasePlay(e, pickSongUrl, songWikiUrl, songInfo, pickNumber = 0, isCkExpired) {
+    // 网易云音乐下载策略 - 需要添加isCloudSong参数
+    neteasePlay(e, pickSongUrl, songWikiUrl, songInfo, pickNumber = 0, isCkExpired, isCloudSong = false) {
+        // 根据歌曲来源选择Cookie
+        const cookieToUse = isCloudSong ? this.neteaseCloudCookie : this.neteaseSongCookie;
+
         axios.get(pickSongUrl, {
             headers: {
                 "User-Agent": COMMON_USER_AGENT,
-                "Cookie": this.neteaseCookie
+                "Cookie": cookieToUse  // 动态选择Cookie
             },
         }).then(async resp => {
             // 国内解决方案，替换API后这里也需要修改
@@ -587,7 +609,7 @@ export class songRequest extends plugin {
             await axios.get(songWikiUrl, {
                 headers: {
                     "User-Agent": COMMON_USER_AGENT,
-                    // "Cookie": this.neteaseCookie
+                    "Cookie": cookieToUse  // 动态选择Cookie
                 },
             }).then(res => {
                 const wikiData = res.data.data.blocks[1]?.creatives || []
@@ -635,30 +657,42 @@ export class songRequest extends plugin {
             // 动态判断后缀名
             let musicExt = resp.data.data?.[0]?.type
             FileSuffix = musicExt
-            // 下载音乐
-            downloadAudio(url, this.getCurDownloadPath(e), title, 'follow', musicExt).then(async path => {
-                try {
-                    // 发送卡片
-                    await sendMusicCard(e, '163', songInfo[pickNumber].id)
-                } catch (error) {
-                    if (error.message) {
-                        logger.error("发送卡片错误错误:", error.message, '发送群语音');
-                    } else {
-                        logger.error("发送卡片错误错误，请查看控制台报错，将发送群语音")
-                        logger.error(error)
-                    }
-                    // 发送群文件
-                    await this.uploadGroupFile(e, path);
-                    // 发送语音
-                    if (musicExt != 'mp4' && this.isSendVocal) {
-                        await e.reply(segment.record(path));
-                    }
-                    // 删除文件
-                    await checkAndRemoveFile(path);
+
+            let cardSentSuccessfully = false;
+            try {
+                // 发送卡片
+                await sendMusicCard(e, '163', songInfo[pickNumber].id);
+                cardSentSuccessfully = true;
+            } catch (error) {
+                if (error.message) {
+                    logger.error("发送卡片错误错误:", error.message, '将尝试发送文件/语音');
+                } else {
+                    logger.error("发送卡片错误错误，请查看控制台报错，将尝试发送文件/语音")
+                    logger.error(error)
                 }
-            }).catch(err => {
-                logger.error(`下载音乐失败，错误信息为: ${err}`);
-            });
+                cardSentSuccessfully = false;
+            }
+            // 下载音乐
+            downloadAudio(url, this.getCurDownloadPath(e), title, 'follow', musicExt)
+                .then(async path => {
+                    if (!cardSentSuccessfully) {
+                        try {
+                            // 发送语音
+                            if (musicExt != 'mp4' && this.isSendVocal) {
+                                await e.reply(segment.record(path));
+                            }
+                            // 发送群文件
+                            await this.uploadGroupFile(e, path);
+                        } finally {
+                            // 删除文件
+                            await checkAndRemoveFile(path);
+                        }
+                    }
+                    logger.info(`下载音乐完成: ${title}，路径: ${path}`);
+                })
+                .catch(err => {
+                    logger.error(`下载音乐失败，错误信息为: ${err}`);
+                });
         });
     }
 

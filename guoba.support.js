@@ -333,6 +333,28 @@ export function supportGuoba() {
                 },
                 {
                     field: "tools.neteaseCookie",
+                    label: "网易云Cookie（点歌专用）",
+                    bottomHelpMessage:
+                        "专门用于点歌和音乐解析的网易云Cookie，如何获取具体参考文档说明",
+                    component: "Input",
+                    required: false,
+                    componentProps: {
+                        placeholder: "请输入点歌专用的网易云Cookie",
+                    },
+                },
+                {
+                    field: "tools.neteaseCloudCookie",
+                    label: "网易云Cookie（云盘专用）",
+                    bottomHelpMessage:
+                        "专门用于云盘操作（上传、下载、获取云盘歌单）的网易云Cookie",
+                    component: "Input",
+                    required: false,
+                    componentProps: {
+                        placeholder: "请输入云盘专用的网易云Cookie",
+                    },
+                },
+                {
+                    field: "tools.neteaseCookie",
                     label: "网易云Cookie",
                     bottomHelpMessage:
                         "可以发送 #RNQ / #rnq 快捷获取 或 者在网易云官网自己获取，格式为：MUSIC_U=xxx",

@@ -30,6 +30,7 @@ useNeteaseSongRequest: false # 是否开启网易云点歌功能
 isSendVocal: true # 是否开启发送群语音
 songRequestMaxList: 10 # 网易云点歌请求最大列表数
 neteaseCookie: '' # 网易云ck
+neteaseCloudCookie: MUSIC_U=你的云盘专用Cookie
 neteaseCloudAPIServer: '' # 网易云自建服务器地址
 neteaseCloudAudioQuality: exhigh # 网易云解析最高音质 默认exhigh(极高) 分类：standard => 标准,higher => 较高, exhigh=>极高, lossless=>无损, hires=>Hi-Res, jyeffect => 高清环绕声, sky => 沉浸环绕声, dolby => 杜比全景声, jymaster => 超清母带
 neteaseUserId: '' # 网易云用户ID 不要手动更改！！！！除非你非常清楚你在做什么

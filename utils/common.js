@@ -538,16 +538,150 @@ export async function downloadM3u8Video(m3u8Url, outputDir, fileName = "video.mp
         }
     }
 
-    // 使用 FFmpeg 直接下载 M3U8（FFmpeg 原生支持多线程分片下载）
+    try {
+        // 1. 获取并解析 m3u8 内容
+        const m3u8Res = await axios.get(m3u8Url, {
+            headers: { 'User-Agent': COMMON_USER_AGENT },
+            timeout: 30000
+        });
+        const m3u8Content = m3u8Res.data;
+
+        // 2. 检查是否加密，加密流直接用 ffmpeg
+        if (m3u8Content.includes('#EXT-X-KEY')) {
+            logger.info(`[R插件][m3u8下载] 检测到加密流，使用 FFmpeg 直接下载`);
+            return downloadM3u8WithFFmpeg(m3u8Url, outputPath, numThreads);
+        }
+
+        // 3. 解析分片链接
+        const tsUrls = parseM3u8Segments(m3u8Content, m3u8Url);
+        if (tsUrls.length === 0) {
+            logger.info(`[R插件][m3u8下载] 未找到分片，使用 FFmpeg 直接下载`);
+            return downloadM3u8WithFFmpeg(m3u8Url, outputPath, numThreads);
+        }
+
+        logger.info(`[R插件][m3u8下载] 解析到 ${tsUrls.length} 个分片，全部并行下载...`);
+
+        // 4. 创建临时目录
+        const tempDir = path.resolve(outputDir, `temp_${Date.now()}`);
+        await mkdirIfNotExists(tempDir);
+
+        // 5. 并行下载所有分片
+        const downloadTasks = tsUrls.map((url, index) => {
+            return downloadSegment(url, tempDir, index).catch(err => {
+                logger.warn(`[R插件][m3u8下载] 分片 ${index} 下载失败: ${err.message}`);
+                return null;
+            });
+        });
+
+        const results = await Promise.all(downloadTasks);
+
+        // 检查下载结果
+        const successCount = results.filter(r => r !== null).length;
+        if (successCount < tsUrls.length * 0.8) {
+            // 超过20%失败，回退到ffmpeg
+            throw new Error(`分片下载失败过多: ${successCount}/${tsUrls.length}`);
+        }
+
+        logger.info(`[R插件][m3u8下载] 下载完成 ${successCount}/${tsUrls.length}，合并中...`);
+
+        // 6. 生成 filelist.txt 并合并
+        const fileListPath = path.resolve(tempDir, 'filelist.txt');
+        const fileListContent = results
+            .map((result, index) => result ? `file '${index}.ts'` : null)
+            .filter(line => line !== null)
+            .join('\n');
+        fs.writeFileSync(fileListPath, fileListContent);
+
+        // 7. 使用 ffmpeg 合并
+        await new Promise((resolve, reject) => {
+            const cmd = `ffmpeg -y -f concat -safe 0 -i "filelist.txt" -c copy -bsf:a aac_adtstoasc "${outputPath}"`;
+            exec(cmd, { timeout: 300000, cwd: tempDir }, (error) => {
+                if (error) reject(error);
+                else resolve();
+            });
+        });
+
+        // 8. 清理临时文件
+        try {
+            fs.rmSync(tempDir, { recursive: true, force: true });
+        } catch (e) {
+            logger.warn(`[R插件][m3u8下载] 清理临时目录失败: ${e.message}`);
+        }
+
+        if (fs.existsSync(outputPath) && fs.statSync(outputPath).size > 0) {
+            logger.mark(`[R插件][m3u8下载] 完成`);
+            return outputPath;
+        } else {
+            throw new Error("合并后文件无效");
+        }
+
+    } catch (err) {
+        logger.warn(`[R插件][m3u8下载] 并行下载失败: ${err.message}，回退到 FFmpeg 直接下载`);
+        return downloadM3u8WithFFmpeg(m3u8Url, outputPath, numThreads);
+    }
+}
+
+/**
+ * 解析 M3U8 内容，提取分片 URL
+ */
+function parseM3u8Segments(m3u8Content, m3u8Url) {
+    const lines = m3u8Content.split('\n');
+    const tsUrls = [];
+    const baseUrl = m3u8Url.substring(0, m3u8Url.lastIndexOf('/') + 1);
+
+    for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed && !trimmed.startsWith('#')) {
+            if (trimmed.startsWith('http')) {
+                tsUrls.push(trimmed);
+            } else {
+                tsUrls.push(baseUrl + trimmed);
+            }
+        }
+    }
+    return tsUrls;
+}
+
+/**
+ * 下载单个分片
+ */
+async function downloadSegment(url, tempDir, index, retries = 3) {
+    const tsPath = path.resolve(tempDir, `${index}.ts`);
+
+    for (let attempt = 1; attempt <= retries; attempt++) {
+        try {
+            const response = await axios({
+                method: 'get',
+                url: url,
+                responseType: 'arraybuffer',
+                timeout: 60000,
+                headers: { 'User-Agent': COMMON_USER_AGENT }
+            });
+
+            fs.writeFileSync(tsPath, Buffer.from(response.data));
+
+            // 验证文件有效
+            const stat = fs.statSync(tsPath);
+            if (stat.size === 0) {
+                throw new Error('分片文件为空');
+            }
+            return tsPath;
+        } catch (err) {
+            if (attempt === retries) throw err;
+            await new Promise(r => setTimeout(r, 500 * attempt));
+        }
+    }
+}
+
+/**
+ * 使用 FFmpeg 直接下载 M3U8（备用方案）
+ */
+async function downloadM3u8WithFFmpeg(m3u8Url, outputPath, numThreads) {
     return new Promise((resolve, reject) => {
-        // -threads 0: 自动使用最优线程数
-        // -protocol_whitelist: 允许的协议
-        // -allowed_extensions ALL: 允许所有扩展名
-        // -c copy: 直接复制不转码，速度最快
         const cmd = `ffmpeg -y -threads ${numThreads} -protocol_whitelist "file,http,https,tcp,tls,crypto" -allowed_extensions ALL -i "${m3u8Url}" -c copy -bsf:a aac_adtstoasc "${outputPath}"`;
         exec(cmd, { timeout: 600000 }, (error) => {
             if (error) {
-                logger.error(`[R插件][m3u8下载] 失败: ${error.message}`);
+                logger.error(`[R插件][m3u8下载] FFmpeg 下载失败: ${error.message}`);
                 reject(error);
             } else {
                 if (fs.existsSync(outputPath) && fs.statSync(outputPath).size > 0) {
@@ -560,3 +694,4 @@ export async function downloadM3u8Video(m3u8Url, outputDir, fileName = "video.mp
         });
     });
 }
+

@@ -552,8 +552,8 @@ export async function downloadM3u8Video(m3u8Url, outputDir, fileName = "video.mp
             return downloadM3u8WithFFmpeg(m3u8Url, outputPath, numThreads);
         }
 
-        // 3. 解析分片链接
-        const tsUrls = parseM3u8Segments(m3u8Content, m3u8Url);
+        // 3. 解析分片链接（支持嵌套 master playlist）
+        const tsUrls = await parseM3u8Segments(m3u8Content, m3u8Url);
         if (tsUrls.length === 0) {
             logger.info(`[R插件][m3u8下载] 未找到分片，使用 FFmpeg 直接下载`);
             return downloadM3u8WithFFmpeg(m3u8Url, outputPath, numThreads);
@@ -586,8 +586,10 @@ export async function downloadM3u8Video(m3u8Url, outputDir, fileName = "video.mp
 
         // 6. 生成 filelist.txt 并合并
         const fileListPath = path.resolve(tempDir, 'filelist.txt');
+        // 确定分片扩展名
+        const ext = tsUrls[0].toLowerCase().includes('.m4s') ? 'm4s' : 'ts';
         const fileListContent = results
-            .map((result, index) => result ? `file '${index}.ts'` : null)
+            .map((result, index) => result ? `file '${index}.${ext}'` : null)
             .filter(line => line !== null)
             .join('\n');
         fs.writeFileSync(fileListPath, fileListContent);
@@ -622,31 +624,54 @@ export async function downloadM3u8Video(m3u8Url, outputDir, fileName = "video.mp
 }
 
 /**
- * 解析 M3U8 内容，提取分片 URL
+ * 解析 M3U8 内容，提取分片 URL（支持嵌套的 master playlist）
  */
-function parseM3u8Segments(m3u8Content, m3u8Url) {
+async function parseM3u8Segments(m3u8Content, m3u8Url) {
     const lines = m3u8Content.split('\n');
-    const tsUrls = [];
+    const urls = [];
     const baseUrl = m3u8Url.substring(0, m3u8Url.lastIndexOf('/') + 1);
 
     for (const line of lines) {
         const trimmed = line.trim();
         if (trimmed && !trimmed.startsWith('#')) {
-            if (trimmed.startsWith('http')) {
-                tsUrls.push(trimmed);
-            } else {
-                tsUrls.push(baseUrl + trimmed);
-            }
+            let fullUrl = trimmed.startsWith('http') ? trimmed : baseUrl + trimmed;
+            urls.push(fullUrl);
         }
     }
-    return tsUrls;
+
+    // 检查是否是 master playlist（链接指向另一个 m3u8 而不是 .ts）
+    if (urls.length > 0 && (urls[0].includes('.m3u8') || urls[0].includes('.M3U8'))) {
+        // 这是 master playlist，获取第一个（通常是最高画质）子播放列表
+        const subM3u8Url = urls[0];
+        logger.info(`[R插件][m3u8下载] 检测到 master playlist，获取子播放列表...`);
+        try {
+            const subRes = await axios.get(subM3u8Url, {
+                headers: { 'User-Agent': COMMON_USER_AGENT },
+                timeout: 30000
+            });
+            return parseM3u8Segments(subRes.data, subM3u8Url);
+        } catch (err) {
+            logger.warn(`[R插件][m3u8下载] 获取子播放列表失败: ${err.message}`);
+            return [];
+        }
+    }
+
+    // 过滤出媒体分片 (.ts 或 .m4s)
+    const segments = urls.filter(url => {
+        const lower = url.toLowerCase();
+        return lower.includes('.ts') || lower.includes('.m4s');
+    });
+
+    return segments;
 }
 
 /**
  * 下载单个分片
  */
 async function downloadSegment(url, tempDir, index, retries = 3) {
-    const tsPath = path.resolve(tempDir, `${index}.ts`);
+    // 根据 URL 确定文件扩展名
+    const ext = url.toLowerCase().includes('.m4s') ? 'm4s' : 'ts';
+    const segPath = path.resolve(tempDir, `${index}.${ext}`);
 
     for (let attempt = 1; attempt <= retries; attempt++) {
         try {
@@ -658,14 +683,14 @@ async function downloadSegment(url, tempDir, index, retries = 3) {
                 headers: { 'User-Agent': COMMON_USER_AGENT }
             });
 
-            fs.writeFileSync(tsPath, Buffer.from(response.data));
+            fs.writeFileSync(segPath, Buffer.from(response.data));
 
             // 验证文件有效
-            const stat = fs.statSync(tsPath);
+            const stat = fs.statSync(segPath);
             if (stat.size === 0) {
                 throw new Error('分片文件为空');
             }
-            return tsPath;
+            return segPath;
         } catch (err) {
             if (attempt === retries) throw err;
             await new Promise(r => setTimeout(r, 500 * attempt));

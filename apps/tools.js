@@ -472,154 +472,10 @@ export class tools extends plugin {
 
                 const desc = item.desc || "无简介";
                 const authorNickname = item.author?.nickname || "未知作者";
-
                 e.reply(`${this.identifyPrefix}识别：抖音动图，作者：${authorNickname}\n📝 简介：${desc}`);
 
-                const downloadPath = this.getCurDownloadPath(e);
-                await mkdirIfNotExists(downloadPath);
-                const downloadedFilePaths = [];
-                const messageSegments = [];
-
-                // 判断是否有原声
-                const isOriginalSound = item.is_use_music === false || item.image_album_music_info?.volume === 0;
-                // 下载BGM
-                let bgmPath = null;
-                if (item.music?.play_url?.uri) {
-                    try {
-                        const fileName = `douyin_bgm_${Date.now()}`;
-                        const bgmUrl = item.music.play_url.url_list?.[0] || item.music.play_url.uri;
-                        bgmPath = await downloadAudio(bgmUrl, downloadPath, fileName);
-                        logger.info(`[R插件][抖音动图] BGM下载完成: ${bgmPath}`);
-                        downloadedFilePaths.push(bgmPath);
-                    } catch (bgmErr) {
-                        logger.error(`[R插件][抖音动图] BGM下载失败: ${bgmErr.message}`);
-                        bgmPath = null;
-                    }
-                }
-
-                const images = item.images || [];
-
-                // 给我上并发啊啊啊啊
-                const processImage = async (imageItem, index) => {
-                    try {
-                        // 先判断是否有视频（动图），如果有video属性就是动图
-                        if (imageItem.video?.play_addr_h264?.uri || imageItem.video?.play_addr?.uri) {
-                            // 动图：下载视频并与BGM合并
-                            const videoUri = imageItem.video.play_addr_h264?.uri || imageItem.video.play_addr?.uri;
-                            const videoUrl = `https://aweme.snssdk.com/aweme/v1/play/?video_id=${videoUri}&ratio=1080p&line=0`;
-
-                            logger.info(`[R插件][抖音动图] 下载动图视频: ${videoUrl}`);
-
-                            // 使用内置下载方法，带重试逻辑
-                            let videoPath = null;
-                            const maxRetries = 3;
-                            for (let retry = 0; retry < maxRetries; retry++) {
-                                try {
-                                    videoPath = await this.downloadVideo(videoUrl, false, {
-                                        'User-Agent': COMMON_USER_AGENT,
-                                        'Referer': 'https://www.douyin.com/'
-                                    }, this.videoDownloadConcurrency, `douyin_gif_${index}_${Date.now()}.mp4`);
-                                    if (videoPath) break;
-                                } catch (downloadErr) {
-                                    logger.warn(`[R插件][抖音动图] 第${index}个视频下载失败，重试 ${retry + 1}/${maxRetries}`);
-                                }
-                                if (retry < maxRetries - 1) {
-                                    await new Promise(r => setTimeout(r, 500)); // 等待500ms后重试
-                                }
-                            }
-
-                            // 检查下载是否成功
-                            if (!videoPath) {
-                                logger.error(`[R插件][抖音动图] 第${index}个视频下载失败（已重试${maxRetries}次），跳过`);
-                                return null;
-                            }
-
-                            logger.info(`[R插件][抖音动图] 视频下载完成: ${videoPath}`);
-
-                            const files = [videoPath];
-
-                            // 如果有BGM 合并视频和音频
-                            let finalVideoPath = videoPath;
-                            // 如果有原声 不合并视频
-                            if (bgmPath && !isOriginalSound) {
-                                try {
-                                    const mergedPath = `${downloadPath}/douyin_merged_${index}_${Date.now()}.mp4`;
-                                    await mergeVideoWithAudio(videoPath, bgmPath, mergedPath);
-                                    finalVideoPath = mergedPath;
-                                    files.push(mergedPath);
-                                    logger.info(`[R插件][抖音动图] 视频音频合并完成: ${mergedPath}`);
-                                } catch (mergeErr) {
-                                    logger.error(`[R插件][抖音动图] 视频音频合并失败，使用原视频: ${mergeErr}`);
-                                }
-                            }
-
-                            return {
-                                index,
-                                segment: {
-                                    message: segment.video(finalVideoPath),
-                                    nickname: e.sender.card || e.user_id,
-                                    user_id: e.user_id,
-                                },
-                                files
-                            };
-                        } else {
-                            // 静态图片：从url_list获取图片URL
-                            const imageUrl = imageItem.url_list?.[0];
-                            if (imageUrl) {
-                                logger.info(`[R插件][抖音动图] 处理静态图片: ${imageUrl.substring(0, 50)}...`);
-                                return {
-                                    index,
-                                    segment: {
-                                        message: segment.image(imageUrl),
-                                        nickname: e.sender.card || e.user_id,
-                                        user_id: e.user_id,
-                                    },
-                                    files: []
-                                };
-                            } else {
-                                logger.warn(`[R插件][抖音动图] 第${index}项无法获取图片URL，跳过`);
-                            }
-                        }
-                    } catch (itemErr) {
-                        logger.error(`[R插件][抖音动图] 处理第${index}项失败: ${itemErr.message}`);
-                    }
-                    return null;
-                };
-
-                // 并行执行所有图片处理
-                const results = await Promise.all(
-                    images.map((imageItem, index) => processImage(imageItem, index))
-                );
-
-                // 按原顺序整理结果
-                for (const result of results) {
-                    if (result) {
-                        if (result.segment) {
-                            messageSegments.push(result.segment);
-                        }
-                        downloadedFilePaths.push(...result.files);
-                    }
-                }
-
-                // 发送消息
-                if (messageSegments.length > 0) {
-                    if (messageSegments.length > 1) {
-                        await sendImagesInBatches(e, messageSegments, this.imageBatchThreshold);
-                    } else {
-                        await e.reply(messageSegments.map(item => item.message));
-                    }
-                }
-
-                // 发送背景音乐
-                await this.resolveDouyinMusic(e, item, douUrl, bgmPath);
-
-                // 清理临时文件（过滤掉undefined）
-                for (const filePath of downloadedFilePaths.filter(p => p)) {
-                    await checkAndRemoveFile(filePath);
-                }
-
-                // 发送评论
-                await this.douyinComment(e, detailId, headers);
+                // 调用动图函数处理
+                await this.processDouyinImageAlbum(e, item, douUrl, headers, detailId);
 
             } catch (error) {
                 logger.error(`[R插件][抖音动图] 解析失败: ${error.message}`);
@@ -776,33 +632,47 @@ export class tools extends plugin {
                     this.sendVideoToUpload(e, videoPath);
                 });
             } else if (urlType === "image") {
-                // 发送描述
-                e.reply(`${this.identifyPrefix}识别：抖音, ${item.desc}`);
+                // 检查是否包含video字段
+                const hasVideo = item.images?.some(img => img.video?.play_addr_h264?.uri || img.video?.play_addr?.uri);
 
-                // 提取无水印图片URL列表
-                const imageUrls = item.images.map(i => i.url_list[0]);
+                if (hasVideo) {
+                    // 如果有 按照动图处理
+                    const desc = item.desc || "无简介";
+                    const authorNickname = item.author?.nickname || "未知作者";
+                    e.reply(`${this.identifyPrefix}识别：抖音动图，作者：${authorNickname}\n📝 简介：${desc}`);
 
-                // 根据 globalImageLimit 决定发送方式
-                if (imageUrls.length > this.globalImageLimit) {
-                    // 超过限制，使用转发消息
-                    const remoteImageList = imageUrls.map(url => ({
-                        message: segment.image(url),
-                        nickname: this.e.sender.card || this.e.user_id,
-                        user_id: this.e.user_id,
-                    }));
-                    await sendImagesInBatches(e, remoteImageList, this.imageBatchThreshold);
+                    // 调用动图处理函数
+                    await this.processDouyinImageAlbum(e, item, douUrl, headers, douId);
                 } else {
-                    // 在限制内，直接发送图片
-                    const images = imageUrls.map(url => segment.image(url));
-                    await e.reply(images);
+                    // 普通图片
+                    e.reply(`${this.identifyPrefix}识别：抖音, ${item.desc}`);
+
+                    // 提取无水印图片URL列表
+                    const imageUrls = item.images.map(i => i.url_list[0]);
+
+                    // 根据 globalImageLimit 决定发送方式
+                    if (imageUrls.length > this.globalImageLimit) {
+                        // 超过限制 使用转发消息
+                        const remoteImageList = imageUrls.map(url => ({
+                            message: segment.image(url),
+                            nickname: this.e.sender.card || this.e.user_id,
+                            user_id: this.e.user_id,
+                        }));
+                        await sendImagesInBatches(e, remoteImageList, this.imageBatchThreshold);
+                    } else {
+                        // 在限制内 直接发送图片
+                        const images = imageUrls.map(url => segment.image(url));
+                        await e.reply(images);
+                    }
+
+                    // 发送背景音乐
+                    await this.resolveDouyinMusic(e, item, douUrl);
+
+                    // 如果开启评论的话就调用
+                    await this.douyinComment(e, douId, headers);
                 }
+
             }
-            // 发送背景音乐（只在图片图集时发送，视频不需要）
-            if (urlType === "image") {
-                await this.resolveDouyinMusic(e, item, douUrl);
-            }
-            // 如果开启评论的就调用
-            await this.douyinComment(e, douId, headers);
         } catch (err) {
             logger.error(err);
 
@@ -902,6 +772,165 @@ export class tools extends plugin {
             }
             await fs.promises.unlink(outputFilePath); // 下载失败时删除文件
         }
+    }
+
+    /**
+     * 处理抖音动图
+     * @param {Object} e 消息对象
+     * @param {Object} item 抖音内容详情 (aweme_detail)
+     * @param {string} douUrl 原始分享链接
+     * @param {Object} headers 请求头（用于评论，可选）
+     * @param {string} douId 抖音ID（用于评论，可选）
+     */
+    async processDouyinImageAlbum(e, item, douUrl, headers = null, douId = null) {
+        const downloadPath = this.getCurDownloadPath(e);
+        await mkdirIfNotExists(downloadPath);
+
+        // 判断是否有原声
+        const isOriginalSound = item.is_use_music === false || item.image_album_music_info?.volume === 0;
+
+        // 下载BGM
+        let bgmPath = null;
+        if (item.music?.play_url?.uri) {
+            try {
+                const fileName = `douyin_bgm_${Date.now()}`;
+                const bgmUrl = item.music.play_url.url_list?.[0] || item.music.play_url.uri;
+                bgmPath = await downloadAudio(bgmUrl, downloadPath, fileName);
+                logger.info(`[R插件][抖音动图] BGM下载完成: ${bgmPath}`);
+            } catch (bgmErr) {
+                logger.error(`[R插件][抖音动图] BGM下载失败: ${bgmErr.message}`);
+                bgmPath = null;
+            }
+        }
+
+        const images = item.images || [];
+        const messageSegments = [];
+        const downloadedFilePaths = [];
+
+        // 并发处理所有动图
+        const processImage = async (imageItem, index) => {
+            try {
+                // 检查是否有video字段（动图）
+                if (imageItem.video?.play_addr_h264?.uri || imageItem.video?.play_addr?.uri) {
+                    // 动图：下载视频并与BGM合并
+                    const videoUri = imageItem.video.play_addr_h264?.uri || imageItem.video.play_addr?.uri;
+                    const videoUrl = `https://aweme.snssdk.com/aweme/v1/play/?video_id=${videoUri}&ratio=1080p&line=0`;
+
+                    logger.info(`[R插件][抖音动图] 下载动图视频 ${index + 1}: ${videoUrl}`);
+
+                    // 使用内置下载方法 带重试逻辑
+                    let videoPath = null;
+                    const maxRetries = 3;
+                    for (let retry = 0; retry < maxRetries; retry++) {
+                        try {
+                            videoPath = await this.downloadVideo(videoUrl, false, {
+                                'User-Agent': COMMON_USER_AGENT,
+                                'Referer': 'https://www.douyin.com/'
+                            }, this.videoDownloadConcurrency, `douyin_gif_${index}_${Date.now()}.mp4`);
+                            if (videoPath) break;
+                        } catch (downloadErr) {
+                            logger.warn(`[R插件][抖音动图] 第${index + 1}个视频下载失败，重试 ${retry + 1}/${maxRetries}`);
+                        }
+                        if (retry < maxRetries - 1) {
+                            await new Promise(r => setTimeout(r, 500)); // 等待500ms后重试
+                        }
+                    }
+
+                    // 检查下载是否成功
+                    if (!videoPath) {
+                        logger.error(`[R插件][抖音动图] 第${index + 1}个视频下载失败（已重试${maxRetries}次），跳过`);
+                        return null;
+                    }
+
+                    logger.info(`[R插件][抖音动图] 视频下载完成: ${videoPath}`);
+
+                    const files = [videoPath];
+
+                    // 如果有BGM且非原声 合并视频和音频
+                    let finalVideoPath = videoPath;
+                    if (bgmPath && !isOriginalSound) {
+                        try {
+                            const mergedPath = `${downloadPath}/douyin_merged_${index}_${Date.now()}.mp4`;
+                            await mergeVideoWithAudio(videoPath, bgmPath, mergedPath);
+                            finalVideoPath = mergedPath;
+                            files.push(mergedPath);
+                            logger.info(`[R插件][抖音动图] 视频音频合并完成: ${mergedPath}`);
+                        } catch (mergeErr) {
+                            logger.error(`[R插件][抖音动图] 视频音频合并失败，使用原视频: ${mergeErr}`);
+                        }
+                    }
+
+                    return {
+                        index,
+                        segment: {
+                            message: segment.video(finalVideoPath),
+                            nickname: e.sender.card || e.user_id,
+                            user_id: e.user_id,
+                        },
+                        files
+                    };
+                } else {
+                    // 如果有普通图片的话
+                    const imageUrl = imageItem.url_list?.[0];
+                    if (imageUrl) {
+                        logger.info(`[R插件][抖音动图] 处理图片 ${index + 1}`);
+                        return {
+                            index,
+                            segment: {
+                                message: segment.image(imageUrl),
+                                nickname: e.sender.card || e.user_id,
+                                user_id: e.user_id,
+                            },
+                            files: []
+                        };
+                    } else {
+                        logger.warn(`[R插件][抖音动图] 第${index + 1}项无法获取图片URL，跳过`);
+                    }
+                }
+            } catch (itemErr) {
+                logger.error(`[R插件][抖音动图] 处理第${index + 1}项失败: ${itemErr.message}`);
+            }
+            return null;
+        };
+
+        // 并行执行所有动图处理
+        const results = await Promise.all(
+            images.map((imageItem, index) => processImage(imageItem, index))
+        );
+
+        // 按原顺序整理结果
+        for (const result of results) {
+            if (result) {
+                if (result.segment) {
+                    messageSegments.push(result.segment);
+                }
+                downloadedFilePaths.push(...result.files);
+            }
+        }
+
+        // 发送消息
+        if (messageSegments.length > 0) {
+            if (messageSegments.length > 1) {
+                await sendImagesInBatches(e, messageSegments, this.imageBatchThreshold);
+            } else {
+                await e.reply(messageSegments.map(item => item.message));
+            }
+        }
+
+        // 发送背景音乐
+        await this.resolveDouyinMusic(e, item, douUrl, bgmPath);
+
+        // 清理临时文件（包括BGM和视频文件）
+        const allFilesToClean = [...downloadedFilePaths];
+        if (bgmPath) {
+            allFilesToClean.push(bgmPath);
+        }
+        for (const filePath of allFilesToClean.filter(p => p)) {
+            await checkAndRemoveFile(filePath);
+        }
+
+        // 发送评论
+        await this.douyinComment(e, douId, headers);
     }
 
     /**

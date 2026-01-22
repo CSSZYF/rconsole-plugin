@@ -589,32 +589,73 @@ export class tools extends plugin {
                 }
                 e.reply(`${dySendContent}`);
 
-                // 🔧 修复：优先使用API返回的直接URL，而不是构造URL
+                // 🔧 优化：根据全局videoCodec配置选择视频格式，支持AV1/HEVC/AVC优先级
                 let resUrl = null;
+                let selectedFormat = 'unknown';
 
-                // 策略1: 优先使用play_addr中的URL列表（最可靠）
-                if (play_addr?.url_list && play_addr.url_list.length > 0) {
-                    // HTTPS优先，url_list最后一个通常是HTTPS
-                    resUrl = play_addr.url_list[play_addr.url_list.length - 1] || play_addr.url_list[0];
-                    logger.info(`[R插件][抖音] 使用play_addr URL (共${play_addr.url_list.length}个备选)`);
-                }
+                // 获取全局视频编码配置
+                const videoCodec = this.videoCodec?.toLowerCase() || 'auto';
 
-                // 策略2: 如果启用压缩，尝试使用H.264或H.265（可选）
-                if (!resUrl && this.douyinCompression) {
-                    if (play_addr_h264?.url_list && play_addr_h264.url_list.length > 0) {
-                        resUrl = play_addr_h264.url_list[play_addr_h264.url_list.length - 1] || play_addr_h264.url_list[0];
-                        logger.info(`[R插件][抖音] 使用play_addr_h264 URL (压缩模式)`);
-                    } else if (play_addr_265?.url_list && play_addr_265.url_list.length > 0) {
-                        resUrl = play_addr_265.url_list[play_addr_265.url_list.length - 1] || play_addr_265.url_list[0];
-                        logger.info(`[R插件][抖音] 使用play_addr_265 URL (压缩模式)`);
+                // 根据videoCodec配置选择优先级
+                const formatPriority = (() => {
+                    switch (videoCodec) {
+                        case 'av1':
+                            // 抖音目前没有AV1格式，降级到HEVC
+                            logger.debug(`[R插件][抖音] videoCodec配置为av1，但抖音暂无AV1格式，降级使用HEVC`);
+                            return ['hevc', 'avc', 'original'];
+                        case 'hevc':
+                        case 'h265':
+                            return ['hevc', 'avc', 'original'];
+                        case 'avc':
+                        case 'h264':
+                            return ['avc', 'hevc', 'original'];
+                        case 'auto':
+                        default:
+                            // auto模式：优先HEVC（体积小），其次AVC（兼容性好），最后原始
+                            return ['hevc', 'avc', 'original'];
+                    }
+                })();
+
+                logger.debug(`[R插件][抖音] 视频格式优先级: ${formatPriority.join(' > ')}`);
+
+                // 按优先级尝试获取URL
+                for (const format of formatPriority) {
+                    if (resUrl) break;
+
+                    switch (format) {
+                        case 'hevc':
+                            // HEVC / H.265
+                            if (play_addr_265?.url_list && play_addr_265.url_list.length > 0) {
+                                resUrl = play_addr_265.url_list[play_addr_265.url_list.length - 1] || play_addr_265.url_list[0];
+                                selectedFormat = 'HEVC/H.265';
+                                break;
+                            }
+                            break;
+                        case 'avc':
+                            // AVC / H.264
+                            if (play_addr_h264?.url_list && play_addr_h264.url_list.length > 0) {
+                                resUrl = play_addr_h264.url_list[play_addr_h264.url_list.length - 1] || play_addr_h264.url_list[0];
+                                selectedFormat = 'AVC/H.264';
+                                break;
+                            }
+                            break;
+                        case 'original':
+                            // 原始格式（通常是H.264）
+                            if (play_addr?.url_list && play_addr.url_list.length > 0) {
+                                resUrl = play_addr.url_list[play_addr.url_list.length - 1] || play_addr.url_list[0];
+                                selectedFormat = '原始格式';
+                                break;
+                            }
+                            break;
                     }
                 }
 
-                // 策略3: 备用方案 - 构造URL（兼容旧版本，但可能失效）
+                // 备用方案 - 构造URL（兼容旧版本，但可能失效）
                 if (!resUrl && videoAddrURI) {
                     const resolution = this.douyinCompression ? "720p" : "1080p";
                     resUrl = DY_TOUTIAO_INFO.replace("1080p", resolution).replace("{}", videoAddrURI);
-                    logger.warn(`[R插件][抖音] 使用构造URL (备用方案): ${resUrl}`);
+                    selectedFormat = '构造URL(备用)';
+                    logger.warn(`[R插件][抖音] 使用构造URL (备用方案): ${resUrl.substring(0, 80)}...`);
                 }
 
                 // 最终检查
@@ -625,7 +666,7 @@ export class tools extends plugin {
                     return;
                 }
 
-                logger.info(`[R插件][抖音] 最终视频URL: ${resUrl.substring(0, 100)}...`);
+                logger.info(`[R插件][抖音] 使用${selectedFormat}格式 | URL: ${resUrl.substring(0, 100)}...`);
 
                 // 加入队列
                 await this.downloadVideo(resUrl, false, null, this.videoDownloadConcurrency, 'douyin.mp4').then((videoPath) => {

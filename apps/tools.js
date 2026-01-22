@@ -11,6 +11,7 @@ import qrcode from "qrcode";
 import querystring from "querystring";
 import puppeteer from "../../../lib/puppeteer/puppeteer.js";
 import { replyWithRetry } from "../utils/retry.js";
+import { exponentialBackoff, shouldRetryHttpError } from "../utils/retry-util.js";
 import {
     BILI_CDN_SELECT_LIST,
     BILI_DEFAULT_INTRO_LEN_LIMIT,
@@ -709,9 +710,10 @@ export class tools extends plugin {
             const urlType = douyinTypeMap[urlTypeCode];
             // 核心内容
             if (urlType === "video") {
-                // logger.info(item.video);
-                // 多位面选择：play_addr、play_addr_265、play_addr_h264
-                const { play_addr: { uri: videoAddrURI }, duration, cover } = item.video;
+                // 获取视频相关数据
+                const { play_addr, play_addr_265, play_addr_h264, duration, cover } = item.video;
+                const videoAddrURI = play_addr?.uri;
+
                 // 进行时间判断，如果超过时间阈值就不发送
                 const dyDuration = Math.trunc(duration / 1000);
                 const durationThreshold = this.biliDuration;
@@ -730,24 +732,45 @@ export class tools extends plugin {
                     return;
                 }
                 e.reply(`${dySendContent}`);
-                // 分辨率判断是否压缩
-                const resolution = this.douyinCompression ? "720p" : "1080p";
-                // 使用今日头条 CDN 进一步加快解析速度
-                const resUrl = DY_TOUTIAO_INFO.replace("1080p", resolution).replace("{}", videoAddrURI);
 
-                // ⚠️ 暂时废弃代码
-                /*if (this.douyinCompression) {
-                    // H.265压缩率更高、流量省一半. 相对于H.264
-                    // 265 和 264 随机均衡负载
-                    const videoAddrList = Math.random() > 0.5 ? play_addr_265.url_list : play_addr_h264.url_list;
-                    resUrl = videoAddrList[videoAddrList.length - 1] || videoAddrList[0];
-                } else {
-                    // 原始格式，ps. videoAddrList这里[0]、[1]是 http，[最后一个]是 https
-                    const videoAddrList = play_addr.url_list;
-                    resUrl = videoAddrList[videoAddrList.length - 1] || videoAddrList[0];
-                }*/
+                // 🔧 修复：优先使用API返回的直接URL，而不是构造URL
+                let resUrl = null;
 
-                // logger.info(resUrl);
+                // 策略1: 优先使用play_addr中的URL列表（最可靠）
+                if (play_addr?.url_list && play_addr.url_list.length > 0) {
+                    // HTTPS优先，url_list最后一个通常是HTTPS
+                    resUrl = play_addr.url_list[play_addr.url_list.length - 1] || play_addr.url_list[0];
+                    logger.info(`[R插件][抖音] 使用play_addr URL (共${play_addr.url_list.length}个备选)`);
+                }
+
+                // 策略2: 如果启用压缩，尝试使用H.264或H.265（可选）
+                if (!resUrl && this.douyinCompression) {
+                    if (play_addr_h264?.url_list && play_addr_h264.url_list.length > 0) {
+                        resUrl = play_addr_h264.url_list[play_addr_h264.url_list.length - 1] || play_addr_h264.url_list[0];
+                        logger.info(`[R插件][抖音] 使用play_addr_h264 URL (压缩模式)`);
+                    } else if (play_addr_265?.url_list && play_addr_265.url_list.length > 0) {
+                        resUrl = play_addr_265.url_list[play_addr_265.url_list.length - 1] || play_addr_265.url_list[0];
+                        logger.info(`[R插件][抖音] 使用play_addr_265 URL (压缩模式)`);
+                    }
+                }
+
+                // 策略3: 备用方案 - 构造URL（兼容旧版本，但可能失效）
+                if (!resUrl && videoAddrURI) {
+                    const resolution = this.douyinCompression ? "720p" : "1080p";
+                    resUrl = DY_TOUTIAO_INFO.replace("1080p", resolution).replace("{}", videoAddrURI);
+                    logger.warn(`[R插件][抖音] 使用构造URL (备用方案): ${resUrl}`);
+                }
+
+                // 最终检查
+                if (!resUrl) {
+                    logger.error(`[R插件][抖音] 无法获取视频URL，所有策略均失败`);
+                    logger.debug(`[R插件][抖音] 调试信息: play_addr=${!!play_addr}, uri=${videoAddrURI}`);
+                    e.reply('视频URL获取失败，请稍后重试或联系管理员');
+                    return;
+                }
+
+                logger.info(`[R插件][抖音] 最终视频URL: ${resUrl.substring(0, 100)}...`);
+
                 // 加入队列
                 await this.downloadVideo(resUrl, false, null, this.videoDownloadConcurrency, 'douyin.mp4').then((videoPath) => {
                     this.sendVideoToUpload(e, videoPath);
@@ -782,7 +805,36 @@ export class tools extends plugin {
             await this.douyinComment(e, douId, headers);
         } catch (err) {
             logger.error(err);
-            logger.mark(`Cookie 过期或者 Cookie 没有填写，请参考\n${HELP_DOC}\n尝试无效后可以到官方QQ群[575663150]提出 bug 等待解决`);
+
+            // 根据错误类型给出不同提示
+            let errorMsg = '抖音解析失败';
+
+            if (err.response) {
+                const status = err.response.status;
+                if (status === 404) {
+                    errorMsg = `抖音内容不存在或链接已失效（404错误）\n请检查链接是否正确或稍后重试`;
+                } else if (status === 403) {
+                    errorMsg = `访问被拒绝，Cookie可能过期或权限不足，请参考\n${HELP_DOC}\n更新Cookie配置`;
+                } else if (status === 401) {
+                    errorMsg = `需要登录验证，Cookie已过期，请参考\n${HELP_DOC}\n更新Cookie配置`;
+                } else if (status === 429) {
+                    errorMsg = `请求过于频繁，已被限流（429错误）\n请稍后再试`;
+                } else if (status >= 500) {
+                    errorMsg = `抖音服务器暂时不可用（${status}错误）\n请稍后重试`;
+                } else {
+                    errorMsg = `抖音解析失败（HTTP ${status}）\n${HELP_DOC}`;
+                }
+            } else if (err.code === 'ECONNABORTED' || err.code === 'ETIMEDOUT') {
+                errorMsg = '网络连接超时，请检查网络后重试';
+            } else if (err.code === 'ENOTFOUND' || err.code === 'ECONNREFUSED') {
+                errorMsg = '无法连接到抖音服务器，请检查网络连接';
+            } else if (err.message && err.message.includes('视频URL获取失败')) {
+                // 这是我们自己抛出的错误，直接使用原始消息
+                errorMsg = err.message;
+            }
+
+            logger.mark(`[R插件][抖音] ${errorMsg}`);
+            e.reply(errorMsg);
         }
         return true;
     }
@@ -4643,28 +4695,30 @@ export class tools extends plugin {
      */
     async downloadVideoWithMultiThread(downloadVideoParams, numThreads) {
         const { url, headers, userAgent, proxyOption, target, groupPath } = downloadVideoParams;
-        const maxRetries = 3;
-        const retryDelay = 1000;
 
         try {
-            // Step 1: 请求视频资源获取 Content-Length（带重试）
-            let headRes;
-            for (let retry = 0; retry <= maxRetries; retry++) {
-                try {
-                    headRes = await axios.head(url, {
+            // Step 1: 使用指数型回退请求视频资源获取 Content-Length
+            const headRes = await exponentialBackoff(
+                async (attempt) => {
+                    return await axios.head(url, {
                         headers: headers || { "User-Agent": userAgent },
                         ...proxyOption
                     });
-                    break;
-                } catch (err) {
-                    if (retry < maxRetries) {
-                        logger.warn(`[R插件][视频下载] HEAD请求失败，重试中... (${retry + 1}/${maxRetries})`);
-                        await new Promise(resolve => setTimeout(resolve, retryDelay));
-                    } else {
-                        throw err;
+                },
+                {
+                    maxRetries: 3,
+                    initialDelay: 1000,
+                    factor: 2,
+                    shouldRetry: shouldRetryHttpError,
+                    onRetry: (attempt, maxRetries, delay, error) => {
+                        const statusInfo = error.response?.status ? `状态码${error.response.status}` : error.message;
+                        logger.warn(
+                            `[R插件][视频下载] HEAD请求失败 (${statusInfo})，` +
+                            `将在${Math.round(delay)}ms后进行第${attempt}/${maxRetries}次重试`
+                        );
                     }
                 }
-            }
+            );
 
             const contentLength = headRes.headers['content-length'];
             if (!contentLength) {
@@ -4675,10 +4729,10 @@ export class tools extends plugin {
             const partSize = Math.ceil(contentLength / numThreads);
             let promises = [];
 
-            // 带重试的分片下载函数
+            // 带指数型回退的分片下载函数
             const downloadPartWithRetry = async (partIndex, start, end) => {
-                for (let retry = 0; retry <= maxRetries; retry++) {
-                    try {
+                return await exponentialBackoff(
+                    async (attempt) => {
                         const partAxiosConfig = {
                             headers: {
                                 "User-Agent": userAgent,
@@ -4700,15 +4754,20 @@ export class tools extends plugin {
                             });
                             writer.on("error", reject);
                         });
-                    } catch (err) {
-                        if (retry < maxRetries) {
-                            logger.warn(`[R插件][视频下载] part${partIndex} 下载失败，重试中... (${retry + 1}/${maxRetries}): ${err.message}`);
-                            await new Promise(resolve => setTimeout(resolve, retryDelay));
-                        } else {
-                            throw new Error(`part${partIndex} 下载失败: ${err.message}`);
+                    },
+                    {
+                        maxRetries: 3,
+                        initialDelay: 1000,
+                        factor: 2,
+                        shouldRetry: shouldRetryHttpError,
+                        onRetry: (attempt, maxRetries, delay, error) => {
+                            logger.warn(
+                                `[R插件][视频下载] part${partIndex} 下载失败，` +
+                                `将在${Math.round(delay)}ms后进行第${attempt}/${maxRetries}次重试: ${error.message}`
+                            );
                         }
                     }
-                }
+                );
             };
 
             for (let i = 0; i < numThreads; i++) {
@@ -4883,16 +4942,14 @@ export class tools extends plugin {
      */
     async downloadVideoWithSingleThread(downloadVideoParams) {
         const { url, headers, userAgent, proxyOption, target, groupPath } = downloadVideoParams;
-        const maxRetries = 3;
-        const retryDelay = 1000;
         const axiosConfig = {
             headers: headers || { "User-Agent": userAgent },
             responseType: "stream",
             ...proxyOption
         };
 
-        for (let retry = 0; retry <= maxRetries; retry++) {
-            try {
+        return await exponentialBackoff(
+            async (attempt) => {
                 await checkAndRemoveFile(target);
 
                 const res = await axios.get(url, axiosConfig);
@@ -4904,16 +4961,23 @@ export class tools extends plugin {
                     writer.on("finish", () => resolve(target));
                     writer.on("error", reject);
                 });
-            } catch (err) {
-                if (retry < maxRetries) {
-                    logger.warn(`[R插件][视频下载] 下载失败，重试中... (${retry + 1}/${maxRetries}): ${err.message}`);
-                    await new Promise(resolve => setTimeout(resolve, retryDelay));
-                } else {
-                    logger.error(`下载视频发生错误！\ninfo:${err}`);
-                    throw err;
+            },
+            {
+                maxRetries: 3,
+                initialDelay: 1000,
+                factor: 2,
+                shouldRetry: shouldRetryHttpError,
+                onRetry: (attempt, maxRetries, delay, error) => {
+                    logger.warn(
+                        `[R插件][视频下载] 下载失败，` +
+                        `将在${Math.round(delay)}ms后进行第${attempt}/${maxRetries}次重试: ${error.message}`
+                    );
                 }
             }
-        }
+        ).catch(err => {
+            logger.error(`下载视频发生错误！\ninfo:${err}`);
+            throw err;
+        });
     }
 
     /**

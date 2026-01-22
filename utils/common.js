@@ -7,6 +7,7 @@ import os from "os";
 import path from 'path';
 import { BILI_DOWNLOAD_METHOD, COMMON_USER_AGENT, SHORT_LINKS, TEN_THOUSAND } from "../constants/constant.js";
 import { mkdirIfNotExists } from "./file.js";
+import { exponentialBackoff, shouldRetryHttpError } from "./retry-util.js";
 
 /**
  * 生成随机字符串
@@ -353,28 +354,63 @@ export function formatSeconds(seconds) {
 }
 
 /**
- * 重试 axios 请求
+ * 重试 axios 请求（智能版本）
  * @param requestFunction 返回 axios promise 的函数
- * @param retries 重试次数
- * @param delay 重试延迟（毫秒）
- * @returns {*}
+ * @param retries 最大重试次数（默认根据错误类型智能判断：值得重试的3次，其他1次）
+ * @param delay 初始延迟（毫秒，默认1000ms）
+ * @returns {Promise<any>} 返回响应数据
+ * 
+ * @example
+ * // 基础用法（智能重试）
+ * const data = await retryAxiosReq(() => axios.get(url));
+ * 
+ * // 自定义重试次数
+ * const data = await retryAxiosReq(() => axios.get(url), 5);
+ * 
+ * @description
+ * 新版本使用智能重试策略：
+ * - 默认重试1次（快速失败）
+ * - 对于网络错误、500+服务器错误等"值得重试"的情况，自动重试3次
+ * - 使用指数型回退（1s → 2s → 4s），不再是固定延迟
+ * - 404、400等客户端错误不重试
  */
-export async function retryAxiosReq(requestFunction, retries = 3, delay = 1000) {
-    try {
-        const response = await requestFunction();
-        if (!response.data) {
-            throw new Error('请求空数据');
+export async function retryAxiosReq(requestFunction, retries = null, delay = 1000) {
+    return exponentialBackoff(
+        async (attempt) => {
+            const response = await requestFunction();
+            if (!response.data) {
+                throw new Error('请求空数据');
+            }
+            return response.data;
+        },
+        {
+            maxRetries: retries !== null ? retries : 1, // 默认只重试1次
+            initialDelay: delay,
+            factor: 2,
+            shouldRetry: (error) => {
+                // 智能判断：值得重试的错误自动提升到3次
+                const worthRetrying = shouldRetryHttpError(error) ||
+                    (error.message && error.message.includes('空数据'));
+
+                if (worthRetrying && retries === null) {
+                    // 如果没有指定重试次数，且是值得重试的错误，提升到3次
+                    return true;
+                }
+
+                // 404等客户端错误不重试
+                return worthRetrying;
+            },
+            onRetry: (attempt, maxRetries, delayMs, error) => {
+                const errorInfo = error.response?.status
+                    ? `状态码${error.response.status}`
+                    : error.message || '未知错误';
+                logger.mark(
+                    `[R插件][智能重试] 请求失败 (${errorInfo})，` +
+                    `将在${Math.round(delayMs)}ms后进行第${attempt}/${maxRetries}次重试`
+                );
+            }
         }
-        return response.data;
-    } catch (error) {
-        if (retries > 0) {
-            logger.mark(`[R插件][重试模块]重试中... (${3 - retries + 1}/3) 次`);
-            await new Promise(resolve => setTimeout(resolve, delay));
-            return retryAxiosReq(requestFunction, retries - 1, delay);
-        } else {
-            throw error;
-        }
-    }
+    );
 }
 
 /**

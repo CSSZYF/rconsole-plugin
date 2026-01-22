@@ -672,6 +672,9 @@ export class tools extends plugin {
                 await this.downloadVideo(resUrl, false, null, this.videoDownloadConcurrency, 'douyin.mp4').then((videoPath) => {
                     this.sendVideoToUpload(e, videoPath);
                 });
+
+                // 发送评论
+                await this.douyinComment(e, douId, headers);
             } else if (urlType === "image") {
                 // 检查是否包含video字段
                 const hasVideo = item.images?.some(img => img.video?.play_addr_h264?.uri || img.video?.play_addr?.uri);
@@ -4770,16 +4773,30 @@ export class tools extends plugin {
             // Step 1: 使用指数型回退请求视频资源获取 Content-Length
             const headRes = await exponentialBackoff(
                 async (attempt) => {
-                    return await axios.head(url, {
+                    const response = await axios.head(url, {
                         headers: headers || { "User-Agent": userAgent },
                         ...proxyOption
                     });
+
+                    // 检查Content-Length，如果没有则抛出错误触发重试
+                    const contentLength = response.headers['content-length'];
+                    if (!contentLength) {
+                        throw new Error("响应中缺少Content-Length头，无法获取视频大小");
+                    }
+
+                    return response;
                 },
                 {
                     maxRetries: 3,
                     initialDelay: 1000,
                     factor: 2,
-                    shouldRetry: shouldRetryHttpError,
+                    shouldRetry: (error) => {
+                        // Content-Length缺失时也应该重试
+                        if (error.message && error.message.includes('Content-Length')) {
+                            return true;
+                        }
+                        return shouldRetryHttpError(error);
+                    },
                     onRetry: (attempt, maxRetries, delay, error) => {
                         const statusInfo = error.response?.status ? `状态码${error.response.status}` : error.message;
                         logger.warn(
@@ -4791,9 +4808,6 @@ export class tools extends plugin {
             );
 
             const contentLength = headRes.headers['content-length'];
-            if (!contentLength) {
-                throw new Error("无法获取视频大小");
-            }
 
             // Step 2: 计算每个线程应该下载的文件部分
             const partSize = Math.ceil(contentLength / numThreads);

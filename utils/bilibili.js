@@ -892,7 +892,17 @@ export async function mergeFileToMp4(vFullFileName, aFullFileName, outputFileNam
     const execFile = util.promisify(child_process.execFile);
     try {
         const cmd = 'ffmpeg';
-        const args = ['-y', '-i', vFullFileName, '-i', aFullFileName, '-c', 'copy', outputFileName];
+
+        // 🔧 Linux 下添加 -movflags +faststart 确保 AV1 视频关键帧正确
+        // 这不会重新编码，只是添加元数据标记
+        const extraArgs = process.platform === 'linux' ? ['-movflags', '+faststart'] : [];
+
+        const args = ['-y', '-i', vFullFileName, '-i', aFullFileName, '-c', 'copy', ...extraArgs, outputFileName];
+
+        if (extraArgs.length > 0) {
+            logger.debug(`[R插件][合并视频和音频] Linux环境，添加关键帧标记参数`);
+        }
+
         await execFile(cmd, args, { env });
 
         if (shouldDelete) {

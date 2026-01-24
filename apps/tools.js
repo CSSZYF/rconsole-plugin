@@ -5,6 +5,7 @@ import _ from "lodash";
 import fetch from "node-fetch";
 import { Buffer } from 'node:buffer';
 import fs from "node:fs";
+import os from "node:os";
 import PQueue from 'p-queue';
 import path from "path";
 import qrcode from "qrcode";
@@ -100,7 +101,7 @@ import {
     truncateString,
     urlTransformShortLink
 } from "../utils/common.js";
-import { convertFlvToMp4, mergeVideoWithAudio } from "../utils/ffmpeg-util.js";
+import { convertFlvToMp4, mergeVideoWithAudio, isAV1Video, fixAV1KeyframesForLinux } from "../utils/ffmpeg-util.js";
 import { checkAndRemoveFile, checkFileExists, deleteFolderRecursive, findFirstMp4File, getMediaFilesAndOthers, mkdirIfNotExists } from "../utils/file.js";
 import GeneralLinkAdapter from "../utils/general-link-adapter.js";
 import { contentEstimator } from "../utils/link-share-summary-util.js";
@@ -5131,26 +5132,79 @@ export class tools extends plugin {
             if (!fs.existsSync(path)) {
                 return e.reply('视频不存在');
             }
-            const stats = fs.statSync(path);
+
+            // 🔧 Linux 下 AV1 视频关键帧修复
+            let videoPath = path;
+            let needCleanupFixed = false;
+
+            // 仅在 Linux 下检测并修复 AV1 视频
+            if (os.platform() === 'linux') {
+                try {
+                    const isAV1 = await isAV1Video(path);
+
+                    if (isAV1) {
+                        logger.info(`[R插件][AV1修复] 检测到Linux环境下的AV1视频，开始修复关键帧`);
+
+                        // 生成修复后的文件名
+                        const fixedPath = path.replace(/(\.\w+)$/, '_fixed$1');
+
+                        // 修复 AV1 视频
+                        await fixAV1KeyframesForLinux(path, fixedPath);
+
+                        // 使用修复后的视频
+                        videoPath = fixedPath;
+                        needCleanupFixed = true;
+
+                        logger.info(`[R插件][AV1修复] AV1视频修复完成，使用修复后的文件发送`);
+                    }
+                } catch (av1Error) {
+                    // 如果检测或修复失败，使用原始视频继续
+                    logger.warn(`[R插件][AV1修复] AV1处理失败，使用原始视频: ${av1Error}`);
+                    videoPath = path;
+                    needCleanupFixed = false;
+                }
+            }
+
+            const stats = fs.statSync(videoPath);
             const videoSize = Math.floor(stats.size / (1024 * 1024));
             // 正常发送视频
             if (videoSize > videoSizeLimit) {
                 e.reply(`当前视频大小：${videoSize}MB，\n大于设置的最大限制：${videoSizeLimit}MB，\n改为上传群文件`);
-                await this.uploadGroupFile(e, path); // uploadGroupFile 内部会处理删除
+                await this.uploadGroupFile(e, videoPath); // uploadGroupFile 内部会处理删除
+
+                // 清理修复后的临时文件（如果有）
+                if (needCleanupFixed && videoPath !== path) {
+                    await checkAndRemoveFile(videoPath);
+                }
             } else {
                 // 使用 replyWithRetry 包装视频发送，自动处理重发
-                const result = await replyWithRetry(e, Bot, segment.video(path));
+                const result = await replyWithRetry(e, Bot, segment.video(videoPath));
+
                 // 发送成功后删除原文件
                 if (result && result.message_id) {
                     await checkAndRemoveFile(path);
                     // 同时清理可能生成的 retry 文件
                     const retryPath = path.replace(/(\.\w+)$/, '_retry$1');
                     await checkAndRemoveFile(retryPath);
+
+                    // 清理修复后的临时文件（如果有）
+                    if (needCleanupFixed && videoPath !== path) {
+                        await checkAndRemoveFile(videoPath);
+                        const fixedRetryPath = videoPath.replace(/(\.\w+)$/, '_retry$1');
+                        await checkAndRemoveFile(fixedRetryPath);
+                    }
                 } else {
                     // 重发也失败了，清理文件
                     await checkAndRemoveFile(path);
                     const retryPath = path.replace(/(\.\w+)$/, '_retry$1');
                     await checkAndRemoveFile(retryPath);
+
+                    // 清理修复后的临时文件（如果有）
+                    if (needCleanupFixed && videoPath !== path) {
+                        await checkAndRemoveFile(videoPath);
+                        const fixedRetryPath = videoPath.replace(/(\.\w+)$/, '_retry$1');
+                        await checkAndRemoveFile(fixedRetryPath);
+                    }
                 }
             }
         } catch (err) {
@@ -5159,6 +5213,12 @@ export class tools extends plugin {
             await checkAndRemoveFile(path);
             const retryPath = path.replace(/(\.\w+)$/, '_retry$1');
             await checkAndRemoveFile(retryPath);
+
+            // 也尝试清理可能的修复文件
+            const fixedPath = path.replace(/(\.\w+)$/, '_fixed$1');
+            await checkAndRemoveFile(fixedPath);
+            const fixedRetryPath = fixedPath.replace(/(\.\w+)$/, '_retry$1');
+            await checkAndRemoveFile(fixedRetryPath);
         }
     }
 

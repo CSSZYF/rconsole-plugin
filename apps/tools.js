@@ -170,7 +170,7 @@ export class tools extends plugin {
                     fnc: "trans",
                 },
                 {
-                    reg: "(v.douyin.com|live.douyin.com|www.douyin.com/video|www.douyin.com/jingxuan|www.douyin.com/discover)",
+                    reg: "(v.douyin.com|live.douyin.com|www.douyin.com)",
                     fnc: "douyin",
                 },
                 {
@@ -427,7 +427,7 @@ export class tools extends plugin {
             logger.info(`[R插件][全局解析控制] ${RESOLVE_CONTROLLER_NAME_ENUM.douyin} 已拦截`);
             return false;
         }
-        const urlRex = /(http:\/\/|https:\/\/)((v|live).douyin.com\/[A-Za-z\d._?%&+\-=\/#]*|www.douyin.com\/video\/[0-9]+|www.douyin.com\/(jingxuan|discover)\?[A-Za-z\d._?%&+\-=\/#]*modal_id=[0-9]+[A-Za-z\d._?%&+\-=\/#]*)/;
+        const urlRex = /(http:\/\/|https:\/\/)((v|live).douyin.com\/[A-Za-z\d._?%&+\-=\/#]*|www.douyin.com\/[A-Za-z\d._?%&+\-=\/#]+)/;
         // 检测无效链接，例如：v.douyin.com，静默忽略
         if (!urlRex.test(e.msg)) {
             return false;
@@ -485,8 +485,8 @@ export class tools extends plugin {
             return true;
         }
         // 获取 ID（支持精选页面 jingxuan 和发现页面 discover 的 modal_id 参数）
-        const douId = /note\/(\d+)/g.exec(douUrl)?.[1] ||
-            /video\/(\d+)/g.exec(douUrl)?.[1] ||
+        const douId = /note\/(\d+)/.exec(douUrl)?.[1] ||
+            /video\/(\d+)/.exec(douUrl)?.[1] ||
             /live.douyin.com\/(\d+)/.exec(douUrl)?.[1] ||
             /live\/(\d+)/.exec(douUrl)?.[1] ||
             /webcast.amemv.com\/douyin\/webcast\/reflow\/(\d+)/.exec(douUrl)?.[1] ||

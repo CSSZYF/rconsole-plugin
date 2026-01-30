@@ -1,4 +1,5 @@
 export const REDIS_YUNZAI_RESOLVE_CONTROLLER = "Yz:rconsole:resolve:controller"
+export const REDIS_YUNZAI_GROUP_RESOLVE_PREFIX = "Yz:rconsole:group:resolve:"
 
 export const RESOLVE_CONTROLLER_NAME_ENUM = {
     "douyin": "抖音",

@@ -1,5 +1,6 @@
 import schedule from 'node-schedule';
 import { REDIS_YUNZAI_ISOVERSEA, REDIS_YUNZAI_WHITELIST } from "../constants/constant.js";
+import { REDIS_YUNZAI_GROUP_RESOLVE_PREFIX, RESOLVE_CONTROLLER_NAME_ENUM } from "../constants/resolve.js";
 import config from "../model/config.js";
 import { deleteFolderRecursive, readCurrentDir } from "../utils/file.js";
 import { redisExistAndGetKey, redisGetKey, redisSetKey } from "../utils/redis-util.js";
@@ -44,6 +45,21 @@ export class switchers extends plugin {
                 {
                     reg: "^#删除R信任用户(.*)",
                     fnc: "deleteWhiteList",
+                    permission: "master",
+                },
+                {
+                    reg: "^#(R解析状态|查询R解析)$",
+                    fnc: "getGroupResolveStatus",
+                    permission: "master",
+                },
+                {
+                    reg: "^#开启解析(\\s+.+)?",
+                    fnc: "enableResolve",
+                    permission: "master",
+                },
+                {
+                    reg: "^#关闭解析(\\s+.+)?",
+                    fnc: "disableResolve",
                     permission: "master",
                 }
             ]
@@ -178,6 +194,215 @@ export class switchers extends plugin {
             e.reply(`成功删除R信任用户：${trustUserId}`);
         } catch (err) {
             e.reply(`删除R信任用户时发生错误: ${err.message}`);
+        }
+    }
+
+    /**
+     * 查询当前群解析状态
+     * @param e
+     * @returns {Promise<void>}
+     */
+    async getGroupResolveStatus(e) {
+        try {
+            if (!e.isGroup) {
+                e.reply("此命令仅在群聊中可用");
+                return;
+            }
+
+            const groupId = e.group_id;
+            const groupResolveKey = `${REDIS_YUNZAI_GROUP_RESOLVE_PREFIX}${groupId}`;
+            const groupConfig = await redisGetKey(groupResolveKey) || { enableAll: true, disabled: [] };
+
+            // 构建状态信息
+            let statusMsg = `【群${groupId}解析状态】\n`;
+            statusMsg += `全局开关: ${groupConfig.enableAll === false ? '❌ 已关闭' : '✅ 已开启'}\n`;
+            statusMsg += `\n各解析功能状态:\n`;
+
+            // 遍历所有解析功能
+            for (const [key, name] of Object.entries(RESOLVE_CONTROLLER_NAME_ENUM)) {
+                const isDisabled = Array.isArray(groupConfig.disabled) && groupConfig.disabled.includes(key);
+                const status = groupConfig.enableAll === false ? '❌ 全局关闭' : (isDisabled ? '❌ 已禁用' : '✅ 已启用');
+                statusMsg += `${name}(${key}): ${status}\n`;
+            }
+
+            e.reply(statusMsg);
+        } catch (err) {
+            e.reply(`查询解析状态时发生错误: ${err.message}`);
+        }
+    }
+
+
+
+    /**
+     * 开启解析功能（全部或指定平台）
+     * @param e
+     * @returns {Promise<void>}
+     */
+    async enableResolve(e) {
+        try {
+            if (!e.isGroup) {
+                e.reply("此命令仅在群聊中可用");
+                return;
+            }
+
+            const groupId = e.group_id;
+            const groupResolveKey = `${REDIS_YUNZAI_GROUP_RESOLVE_PREFIX}${groupId}`;
+
+            // 提取解析名称列表
+            const resolveInput = e.msg.replace(/^#开启解析\s*/, '').trim();
+            const resolveNames = resolveInput.split(/\s+/).filter(name => name.length > 0);
+
+            // 如果没有参数，开启所有解析（清空禁用列表）
+            if (resolveNames.length === 0) {
+                await redisSetKey(groupResolveKey, { enableAll: true, disabled: [] });
+                e.reply(`✅ 已开启群${groupId}的所有解析功能`);
+                return;
+            }
+
+            // 获取当前配置
+            const groupConfig = await redisGetKey(groupResolveKey) || { enableAll: true, disabled: [] };
+
+            // 确保 disabled 是数组
+            if (!Array.isArray(groupConfig.disabled)) {
+                groupConfig.disabled = [];
+            }
+
+            const validNames = [];
+            const invalidNames = [];
+            const enabledNames = [];
+
+            // 处理每个解析名称
+            for (const name of resolveNames) {
+                // 尝试通过中文名或英文名匹配
+                let resolveKey = null;
+                if (name in RESOLVE_CONTROLLER_NAME_ENUM) {
+                    resolveKey = name;
+                } else {
+                    for (const [key, value] of Object.entries(RESOLVE_CONTROLLER_NAME_ENUM)) {
+                        if (value === name) {
+                            resolveKey = key;
+                            break;
+                        }
+                    }
+                }
+
+                if (resolveKey) {
+                    validNames.push(RESOLVE_CONTROLLER_NAME_ENUM[resolveKey]);
+                    // 从禁用列表中移除
+                    const index = groupConfig.disabled.indexOf(resolveKey);
+                    if (index !== -1) {
+                        groupConfig.disabled.splice(index, 1);
+                        enabledNames.push(RESOLVE_CONTROLLER_NAME_ENUM[resolveKey]);
+                    }
+                } else {
+                    invalidNames.push(name);
+                }
+            }
+
+            // 保存配置
+            await redisSetKey(groupResolveKey, groupConfig);
+
+            let msg = '';
+            if (enabledNames.length > 0) {
+                msg += `✅ 已开启解析功能: ${enabledNames.join('、')}\n`;
+            }
+            if (validNames.length > enabledNames.length) {
+                msg += `ℹ️ 以下功能已经是开启状态: ${validNames.filter(n => !enabledNames.includes(n)).join('、')}\n`;
+            }
+            if (invalidNames.length > 0) {
+                msg += `⚠️ 无效的解析名称: ${invalidNames.join('、')}\n`;
+                msg += `提示: 可用的解析功能请使用 #R解析状态 查询`;
+            }
+
+            e.reply(msg || '未进行任何更改');
+        } catch (err) {
+            e.reply(`开启解析时发生错误: ${err.message}`);
+        }
+    }
+
+    /**
+     * 关闭解析功能（全部或指定平台）
+     * @param e
+     * @returns {Promise<void>}
+     */
+    async disableResolve(e) {
+        try {
+            if (!e.isGroup) {
+                e.reply("此命令仅在群聊中可用");
+                return;
+            }
+
+            const groupId = e.group_id;
+            const groupResolveKey = `${REDIS_YUNZAI_GROUP_RESOLVE_PREFIX}${groupId}`;
+
+            // 提取解析名称列表
+            const resolveInput = e.msg.replace(/^#关闭解析\s*/, '').trim();
+            const resolveNames = resolveInput.split(/\s+/).filter(name => name.length > 0);
+
+            // 如果没有参数，关闭所有解析
+            if (resolveNames.length === 0) {
+                await redisSetKey(groupResolveKey, { enableAll: false, disabled: [] });
+                e.reply(`❌ 已关闭群${groupId}的所有解析功能`);
+                return;
+            }
+
+            // 获取当前配置
+            const groupConfig = await redisGetKey(groupResolveKey) || { enableAll: true, disabled: [] };
+
+            // 确保 disabled 是数组
+            if (!Array.isArray(groupConfig.disabled)) {
+                groupConfig.disabled = [];
+            }
+
+            const validNames = [];
+            const invalidNames = [];
+            const disabledNames = [];
+
+            // 处理每个解析名称
+            for (const name of resolveNames) {
+                // 尝试通过中文名或英文名匹配
+                let resolveKey = null;
+                if (name in RESOLVE_CONTROLLER_NAME_ENUM) {
+                    resolveKey = name;
+                } else {
+                    for (const [key, value] of Object.entries(RESOLVE_CONTROLLER_NAME_ENUM)) {
+                        if (value === name) {
+                            resolveKey = key;
+                            break;
+                        }
+                    }
+                }
+
+                if (resolveKey) {
+                    validNames.push(RESOLVE_CONTROLLER_NAME_ENUM[resolveKey]);
+                    // 添加到禁用列表（如果还没有）
+                    if (!groupConfig.disabled.includes(resolveKey)) {
+                        groupConfig.disabled.push(resolveKey);
+                        disabledNames.push(RESOLVE_CONTROLLER_NAME_ENUM[resolveKey]);
+                    }
+                } else {
+                    invalidNames.push(name);
+                }
+            }
+
+            // 保存配置
+            await redisSetKey(groupResolveKey, groupConfig);
+
+            let msg = '';
+            if (disabledNames.length > 0) {
+                msg += `❌ 已关闭解析功能: ${disabledNames.join('、')}\n`;
+            }
+            if (validNames.length > disabledNames.length) {
+                msg += `ℹ️ 以下功能已经是关闭状态: ${validNames.filter(n => !disabledNames.includes(n)).join('、')}\n`;
+            }
+            if (invalidNames.length > 0) {
+                msg += `⚠️ 无效的解析名称: ${invalidNames.join('、')}\n`;
+                msg += `提示: 可用的解析功能请使用 #R解析状态 查询`;
+            }
+
+            e.reply(msg || '未进行任何更改');
+        } catch (err) {
+            e.reply(`关闭解析时发生错误: ${err.message}`);
         }
     }
 }

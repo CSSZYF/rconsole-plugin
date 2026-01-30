@@ -669,10 +669,44 @@ export class tools extends plugin {
 
                 logger.info(`[R插件][抖音] 使用${selectedFormat}格式 | URL: ${resUrl.substring(0, 100)}...`);
 
-                // 加入队列
-                await this.downloadVideo(resUrl, false, null, this.videoDownloadConcurrency, 'douyin.mp4').then((videoPath) => {
-                    this.sendVideoToUpload(e, videoPath);
-                });
+                // 加入队列，使用重试机制
+                try {
+                    const videoPath = await exponentialBackoff(
+                        async (attempt) => {
+                            logger.info(`[R插件][抖音] 开始下载视频 (尝试 ${attempt})`);
+                            return await this.downloadVideo(resUrl, false, null, this.videoDownloadConcurrency, 'douyin.mp4');
+                        },
+                        {
+                            maxRetries: 3,
+                            initialDelay: 2000,
+                            factor: 2,
+                            shouldRetry: (error) => {
+                                // 对于常见的下载错误进行重试
+                                if (error.message && (
+                                    error.message.includes('Content-Length') ||
+                                    error.message.includes('无法获取视频大小') ||
+                                    error.message.includes('ECONNRESET') ||
+                                    error.message.includes('ETIMEDOUT')
+                                )) {
+                                    return true;
+                                }
+                                return shouldRetryHttpError(error);
+                            },
+                            onRetry: (attempt, maxRetries, delay, error) => {
+                                logger.warn(
+                                    `[R插件][抖音] 视频下载失败: ${error.message}，` +
+                                    `将在${Math.round(delay)}ms后进行第${attempt}/${maxRetries}次重试`
+                                );
+                            }
+                        }
+                    );
+
+                    await this.sendVideoToUpload(e, videoPath);
+                } catch (downloadErr) {
+                    logger.error(`[R插件][抖音] 视频下载最终失败: ${downloadErr.message}`);
+                    e.reply(`抖音视频下载失败，已重试3次仍然失败\n错误信息: ${downloadErr.message}\n请稍后再试或联系管理员`);
+                    // 即使下载失败也继续处理评论
+                }
 
                 // 发送评论
                 await this.douyinComment(e, douId, headers);
@@ -5071,6 +5105,41 @@ export class tools extends plugin {
      * @returns {Promise<boolean>}
      */
     async isEnableResolve(resolveName) {
+        // 1. 群级别解析控制（优先级最高）
+        const groupId = this.e?.group_id;
+        if (groupId) {
+            try {
+                const { REDIS_YUNZAI_GROUP_RESOLVE_PREFIX } = await import('../constants/resolve.js');
+                const groupResolveKey = `${REDIS_YUNZAI_GROUP_RESOLVE_PREFIX}${groupId}`;
+                const groupConfig = await redisGetKey(groupResolveKey);
+
+                if (groupConfig) {
+                    // 检查是否是临时解析请求（引用+@机器人+"解析"）
+                    const isTempParse = await this.checkTempParseRequest();
+                    if (isTempParse) {
+                        logger.info(`[R插件][群解析控制] 检测到临时解析请求，允许解析${resolveName}`);
+                        return true;
+                    }
+
+                    // 如果全局关闭，则拦截所有解析
+                    if (groupConfig.enableAll === false) {
+                        logger.info(`[R插件][群解析控制] 群${groupId}已全局关闭解析，拦截${resolveName}`);
+                        return false;
+                    }
+
+                    // 检查是否在群禁用列表中
+                    if (Array.isArray(groupConfig.disabled) && groupConfig.disabled.includes(resolveName)) {
+                        logger.info(`[R插件][群解析控制] 群${groupId}已禁用${resolveName}解析`);
+                        return false;
+                    }
+                }
+            } catch (err) {
+                logger.error(`[R插件][群解析控制] 检查群配置时发生错误: ${err.message}`);
+                // 出错时继续执行，不影响解析功能
+            }
+        }
+
+        // 2. 全局黑名单控制（优先级较低）
         const controller = this.globalBlackList;
         // 如果不存在，那么直接放行
         if (controller == null) {
@@ -5080,6 +5149,46 @@ export class tools extends plugin {
         const foundItem = controller.find(item => item === resolveName);
         // 如果 undefined 说明不在禁用列表就放行
         return foundItem === undefined;
+    }
+
+    /**
+     * 检查是否是临时解析请求
+     * 条件：1. 引用了消息 2. @了机器人 3. 发送"解析"二字
+     * @returns {Promise<boolean>}
+     */
+    async checkTempParseRequest() {
+        try {
+            // 必须有引用的消息
+            if (!this.e?.reply_id) {
+                return false;
+            }
+
+            // 检查消息中是否包含"解析"二字
+            const msgText = this.e.msg?.trim();
+            if (!msgText || !msgText.includes('解析')) {
+                return false;
+            }
+
+            // 检查是否@了机器人
+            const atList = this.e.message?.filter(item => item.type === 'at');
+            if (!atList || atList.length === 0) {
+                return false;
+            }
+
+            // 检查是否@的是机器人自己
+            const botQQ = this.e.self_id || Bot.uin;
+            const isAtBot = atList.some(at => at.qq == botQQ);
+
+            if (isAtBot && msgText === '解析') {
+                logger.info(`[R插件][临时解析] 检测到临时解析请求: 用户${this.e.user_id}引用消息并@机器人请求解析`);
+                return true;
+            }
+
+            return false;
+        } catch (err) {
+            logger.error(`[R插件][临时解析] 检查临时解析请求时发生错误: ${err.message}`);
+            return false;
+        }
     }
 
     /**

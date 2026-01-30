@@ -420,6 +420,44 @@ export class tools extends plugin {
         return true;
     }
 
+    /**
+     * 尝试解析消息，依次尝试各个平台（用于临时解析功能）
+     */
+    async tryParseMessage(e) {
+        const parsers = [
+            { name: 'douyin', regex: /(v.douyin.com|live.douyin.com|www.douyin.com)/ },
+            { name: 'bili', regex: /(bilibili.com|b23.tv|bili2233.cn|m.bilibili.com|t.bilibili.com|BV[1-9a-zA-Z]{10})/ },
+            { name: 'tiktok', regex: /(www.tiktok.com|vt.tiktok.com|vm.tiktok.com)/ },
+            { name: 'xhs', regex: /(xhslink.com|xiaohongshu.com)/ },
+            { name: 'general', regex: /(chenzhongtech.com|kuaishou.com|ixigua.com)/ },
+            { name: 'sy2b', regex: /(youtube.com|youtu.be)/ },
+            { name: 'netease', regex: /(music.163.com|163cn.tv)/ },
+            { name: 'weibo', regex: /(weibo.com|m.weibo.cn)/ },
+            { name: 'twitter_x', regex: /x.com\/[0-9-a-zA-Z_]{1,20}\/status\/([0-9]*)/ },
+            { name: 'acfun', regex: /(acfun.cn)/ },
+            { name: 'miyoushe', regex: /(miyoushe.com)/ },
+            { name: 'qqMusic', regex: /(y.qq.com)/ },
+            { name: 'tieba', regex: /(tieba.baidu.com)/ },
+        ];
+
+        this.e = e; // 设置 this.e 以供解析方法使用
+
+        for (const parser of parsers) {
+            if (parser.regex.test(e.msg)) {
+                try {
+                    const result = await this[parser.name](e);
+                    if (result !== false) {
+                        return true;
+                    }
+                } catch (err) {
+                    logger.error(`[R插件][临时解析] ${parser.name}解析失败: ${err.message}`);
+                }
+            }
+        }
+
+        return false;
+    }
+
     // 抖音解析
     async douyin(e) {
         // 切面判断是否需要解析
@@ -669,44 +707,33 @@ export class tools extends plugin {
 
                 logger.info(`[R插件][抖音] 使用${selectedFormat}格式 | URL: ${resUrl.substring(0, 100)}...`);
 
-                // 加入队列，使用重试机制
-                try {
-                    const videoPath = await exponentialBackoff(
-                        async (attempt) => {
-                            logger.info(`[R插件][抖音] 开始下载视频 (尝试 ${attempt})`);
-                            return await this.downloadVideo(resUrl, false, null, this.videoDownloadConcurrency, 'douyin.mp4');
-                        },
-                        {
-                            maxRetries: 3,
-                            initialDelay: 2000,
-                            factor: 2,
-                            shouldRetry: (error) => {
-                                // 对于常见的下载错误进行重试
-                                if (error.message && (
-                                    error.message.includes('Content-Length') ||
-                                    error.message.includes('无法获取视频大小') ||
-                                    error.message.includes('ECONNRESET') ||
-                                    error.message.includes('ETIMEDOUT')
-                                )) {
-                                    return true;
-                                }
-                                return shouldRetryHttpError(error);
-                            },
-                            onRetry: (attempt, maxRetries, delay, error) => {
-                                logger.warn(
-                                    `[R插件][抖音] 视频下载失败: ${error.message}，` +
-                                    `将在${Math.round(delay)}ms后进行第${attempt}/${maxRetries}次重试`
-                                );
-                            }
-                        }
-                    );
+                // 下载视频（渐进式线程降级策略）
+                let downloadSuccess = false;
+                let currentThreads = Math.min(this.videoDownloadConcurrency, 8); // 抖音最多8线程
+                let lastError = null;
 
-                    await this.sendVideoToUpload(e, videoPath);
-                } catch (downloadErr) {
-                    logger.error(`[R插件][抖音] 视频下载最终失败: ${downloadErr.message}`);
-                    e.reply(`抖音视频下载失败，已重试3次仍然失败\n错误信息: ${downloadErr.message}\n请稍后再试或联系管理员`);
-                    // 即使下载失败也继续处理评论
+                while (!downloadSuccess && currentThreads >= 1) {
+                    try {
+                        logger.info(`[R插件][抖音] 尝试 ${currentThreads} 线程下载...`);
+                        const videoPath = await this.downloadVideo(resUrl, false, null, currentThreads, 'douyin.mp4');
+                        await this.sendVideoToUpload(e, videoPath);
+                        downloadSuccess = true;
+                    } catch (downloadErr) {
+                        lastError = downloadErr;
+                        if (currentThreads > 1) {
+                            // 减少线程数继续尝试
+                            const prevThreads = currentThreads;
+                            currentThreads = Math.floor(currentThreads / 2);
+                            logger.warn(`[R插件][抖音] ${prevThreads}线程下载失败: ${downloadErr.message}，降级为${currentThreads}线程重试...`);
+                        } else {
+                            // 单线程也失败了
+                            logger.error(`[R插件][抖音] 所有线程数都失败: ${downloadErr.message}`);
+                            e.reply(`抖音视频下载失败: ${downloadErr.message}\n请稍后再试`);
+                            break;
+                        }
+                    }
                 }
+                // 即使下载失败也继续处理评论
 
                 // 发送评论
                 await this.douyinComment(e, douId, headers);
@@ -4252,9 +4279,10 @@ export class tools extends plugin {
                     await e.reply(messagesToSend.flat());
                 }
 
-                // 处理并发送视频
+                // 处理并发送视频（小黑盒视频为m3u8格式，直接用ffmpeg下载）
                 if (link.has_video === 1 && link.video_url) {
-                    const videoPath = await this.downloadVideo(link.video_url, false, null, this.videoDownloadConcurrency, 'xiaoheihe.mp4');
+                    const groupPath = `${this.defaultPath}${this.e.group_id || this.e.user_id}`;
+                    const videoPath = await downloadM3u8Video(link.video_url, groupPath, 'xiaoheihe.mp4', 5);
                     await this.sendVideoToUpload(e, videoPath);
                 }
 
@@ -5105,6 +5133,11 @@ export class tools extends plugin {
      * @returns {Promise<boolean>}
      */
     async isEnableResolve(resolveName) {
+        // 0. 临时解析请求优先放行
+        if (this.e?.isTempParse) {
+            return true;
+        }
+
         // 1. 群级别解析控制（优先级最高）
         const groupId = this.e?.group_id;
         if (groupId) {
@@ -5114,13 +5147,6 @@ export class tools extends plugin {
                 const groupConfig = await redisGetKey(groupResolveKey);
 
                 if (groupConfig) {
-                    // 检查是否是临时解析请求（引用+@机器人+"解析"）
-                    const isTempParse = await this.checkTempParseRequest();
-                    if (isTempParse) {
-                        logger.info(`[R插件][群解析控制] 检测到临时解析请求，允许解析${resolveName}`);
-                        return true;
-                    }
-
                     // 如果全局关闭，则拦截所有解析
                     if (groupConfig.enableAll === false) {
                         logger.info(`[R插件][群解析控制] 群${groupId}已全局关闭解析，拦截${resolveName}`);
@@ -5149,46 +5175,6 @@ export class tools extends plugin {
         const foundItem = controller.find(item => item === resolveName);
         // 如果 undefined 说明不在禁用列表就放行
         return foundItem === undefined;
-    }
-
-    /**
-     * 检查是否是临时解析请求
-     * 条件：1. 引用了消息 2. @了机器人 3. 发送"解析"二字
-     * @returns {Promise<boolean>}
-     */
-    async checkTempParseRequest() {
-        try {
-            // 必须有引用的消息
-            if (!this.e?.reply_id) {
-                return false;
-            }
-
-            // 检查消息中是否包含"解析"二字
-            const msgText = this.e.msg?.trim();
-            if (!msgText || !msgText.includes('解析')) {
-                return false;
-            }
-
-            // 检查是否@了机器人
-            const atList = this.e.message?.filter(item => item.type === 'at');
-            if (!atList || atList.length === 0) {
-                return false;
-            }
-
-            // 检查是否@的是机器人自己
-            const botQQ = this.e.self_id || Bot.uin;
-            const isAtBot = atList.some(at => at.qq == botQQ);
-
-            if (isAtBot && msgText === '解析') {
-                logger.info(`[R插件][临时解析] 检测到临时解析请求: 用户${this.e.user_id}引用消息并@机器人请求解析`);
-                return true;
-            }
-
-            return false;
-        } catch (err) {
-            logger.error(`[R插件][临时解析] 检查临时解析请求时发生错误: ${err.message}`);
-            return false;
-        }
     }
 
     /**

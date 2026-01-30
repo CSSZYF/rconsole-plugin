@@ -61,6 +61,10 @@ export class switchers extends plugin {
                     reg: "^#关闭解析(\\s+.+)?",
                     fnc: "disableResolve",
                     permission: "master",
+                },
+                {
+                    reg: "^解析$",  // 临时解析功能
+                    fnc: "tempResolve",
                 }
             ]
         });
@@ -228,6 +232,49 @@ export class switchers extends plugin {
             e.reply(statusMsg);
         } catch (err) {
             e.reply(`查询解析状态时发生错误: ${err.message}`);
+        }
+    }
+
+    /**
+     * 临时解析功能
+     * 使用方法：引用包含链接的消息 + @机器人 + 发送"解析"
+     */
+    async tempResolve(e) {
+        try {
+            // 检查是否@了机器人
+            const atList = e.message?.filter(item => item.type === 'at') || [];
+            const botQQ = e.self_id || Bot.uin;
+            const isAtBot = atList.some(at => at.qq == botQQ);
+
+            if (!isAtBot) {
+                return false;
+            }
+
+            // 有引用消息 - 解析被引用的消息
+            if (e.reply_id) {
+                const replyMsg = await e.getReply();
+                // raw_message 是字符串格式的原始消息
+                const replyMsgText = replyMsg?.raw_message || '';
+
+                // 动态导入 tools 插件并调用解析
+                const { tools } = await import('./tools.js');
+                const toolsPlugin = new tools();
+                // 添加 isTempParse 标志以绕过群级别拦截
+                const tempE = { ...e, msg: replyMsgText, isTempParse: true };
+
+                const parseResult = await toolsPlugin.tryParseMessage(tempE);
+
+                if (!parseResult) {
+                    e.reply(`未能识别被引用消息中的链接`);
+                }
+                return parseResult;
+            }
+
+            e.reply(`请引用要解析的消息`);
+            return false;
+        } catch (err) {
+            e.reply(`临时解析出错: ${err.message}`);
+            return false;
         }
     }
 

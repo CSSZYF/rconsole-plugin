@@ -709,7 +709,7 @@ export class tools extends plugin {
 
                 // 下载视频（渐进式线程降级策略）
                 let downloadSuccess = false;
-                let currentThreads = Math.min(this.videoDownloadConcurrency, 8); // 抖音最多8线程
+                let currentThreads = Math.min(this.videoDownloadConcurrency, 6); // 抖音最多6线程（平衡速度和稳定性）
                 let lastError = null;
 
                 while (!downloadSuccess && currentThreads >= 1) {
@@ -4837,7 +4837,13 @@ export class tools extends plugin {
             const headRes = await exponentialBackoff(
                 async (attempt) => {
                     const response = await axios.head(url, {
-                        headers: headers || { "User-Agent": userAgent },
+                        headers: {
+                            ...(headers || {}),
+                            "User-Agent": userAgent,
+                            "Accept-Encoding": "identity",
+                            "Accept": "*/*"
+                        },
+                        decompress: false,
                         ...proxyOption
                     });
 
@@ -4883,23 +4889,92 @@ export class tools extends plugin {
                         const partAxiosConfig = {
                             headers: {
                                 "User-Agent": userAgent,
-                                "Range": `bytes=${start}-${end}`
+                                "Range": `bytes=${start}-${end}`,
+                                "Accept-Encoding": "identity",
+                                "Accept": "*/*",
+                                "Connection": "keep-alive"
                             },
                             responseType: "stream",
+                            decompress: false,
                             ...proxyOption
                         };
 
                         const res = await axios.get(url, partAxiosConfig);
+
+                        // 记录响应信息用于调试
+                        const contentLength = res.headers['content-length'];
+                        const contentEncoding = res.headers['content-encoding'];
+                        logger.debug(`[R插件][视频下载] part${partIndex} 响应: 状态=${res.status}, Content-Length=${contentLength}, Content-Encoding=${contentEncoding || 'none'}`);
+
                         return new Promise((resolve, reject) => {
                             const partPath = `${target}.part${partIndex}`;
-                            logger.mark(`[R插件][视频下载引擎] 正在下载 part${partIndex}`);
+                            logger.mark(`[R插件][视频下载引擎] 正在下载 part${partIndex} (${start}-${end})`);
                             const writer = fs.createWriteStream(partPath);
-                            res.data.pipe(writer);
-                            writer.on("finish", () => {
-                                logger.mark(`[R插件][视频下载引擎] part${partIndex} 下载完成`);
-                                resolve(partPath);
+                            let bytesWritten = 0;
+                            let lastDataTime = Date.now();
+                            let downloadStarted = false;
+
+                            // 🔧 关键修复：实时超时检测（激进参数 - 快速失败）
+                            const timeoutChecker = setInterval(() => {
+                                const now = Date.now();
+                                const timeSinceLastData = now - lastDataTime;
+
+                                // 检查1：如果开始下载500ms后文件仍为0KB，立即失败
+                                if (downloadStarted && timeSinceLastData > 500 && bytesWritten === 0) {
+                                    clearInterval(timeoutChecker);
+                                    writer.destroy();
+                                    const err = new Error(`part${partIndex} 下载超时：500ms内没有接收到任何数据 (Content-Length=${contentLength})`);
+                                    logger.error(`[R插件][视频下载] ${err.message}`);
+                                    reject(err);
+                                    return;
+                                }
+
+                                // 检查2：如果1.5秒没有新数据，认为连接已断开
+                                if (timeSinceLastData > 1500) {
+                                    clearInterval(timeoutChecker);
+                                    writer.destroy();
+                                    const err = new Error(`part${partIndex} 下载中断：1.5秒没有新数据 (已下载${(bytesWritten / 1024).toFixed(2)}KB)`);
+                                    logger.error(`[R插件][视频下载] ${err.message}`);
+                                    reject(err);
+                                    return;
+                                }
+                            }, 200); // 每200ms检查一次（高频检测）
+
+                            // 监控数据流
+                            res.data.on('data', (chunk) => {
+                                downloadStarted = true;
+                                bytesWritten += chunk.length;
+                                lastDataTime = Date.now(); // 更新最后接收数据时间
                             });
-                            writer.on("error", reject);
+
+                            res.data.pipe(writer);
+
+                            writer.on("finish", () => {
+                                clearInterval(timeoutChecker);
+                                const stats = fs.existsSync(partPath) ? fs.statSync(partPath) : null;
+                                const actualSize = stats ? stats.size : 0;
+                                logger.mark(`[R插件][视频下载引擎] part${partIndex} 下载完成，文件大小: ${(actualSize / 1024).toFixed(2)} KB`);
+
+                                // 如果文件是0KB，立即报错
+                                if (actualSize === 0) {
+                                    reject(new Error(`part${partIndex} 下载后为0KB (Content-Length=${contentLength}, 响应状态=${res.status})`));
+                                } else {
+                                    resolve(partPath);
+                                }
+                            });
+
+                            writer.on("error", (err) => {
+                                clearInterval(timeoutChecker);
+                                logger.error(`[R插件][视频下载] part${partIndex} 写入错误: ${err.message}`);
+                                reject(err);
+                            });
+
+                            // 监控流错误
+                            res.data.on('error', (err) => {
+                                clearInterval(timeoutChecker);
+                                logger.error(`[R插件][视频下载] part${partIndex} 数据流错误: ${err.message}`);
+                                reject(err);
+                            });
                         });
                     },
                     {
@@ -4928,6 +5003,26 @@ export class tools extends plugin {
 
             // 等待所有部分都下载完毕
             const parts = await Promise.all(promises);
+
+            // 🔧 新增：检查所有分片文件大小，防止0kb分片导致合并失败
+            logger.info(`[R插件][视频下载] 检查${parts.length}个分片文件完整性...`);
+            for (let i = 0; i < parts.length; i++) {
+                const partPath = parts[i];
+                if (!fs.existsSync(partPath)) {
+                    throw new Error(`分片 part${i} 不存在: ${partPath}`);
+                }
+                const stats = fs.statSync(partPath);
+                if (stats.size === 0) {
+                    // 清理所有分片文件
+                    for (const p of parts) {
+                        try { fs.unlinkSync(p); } catch (e) { }
+                    }
+                    throw new Error(`分片 part${i} 为0KB，下载失败。这通常是网络中断或服务器拒绝请求导致。`);
+                }
+                logger.debug(`[R插件][视频下载] part${i}: ${(stats.size / 1024).toFixed(2)} KB ✓`);
+            }
+            logger.mark(`[R插件][视频下载] 所有分片完整性检查通过`);
+
 
             // Step 4: 合并下载的文件部分
             await checkAndRemoveFile(target);
@@ -5090,8 +5185,15 @@ export class tools extends plugin {
     async downloadVideoWithSingleThread(downloadVideoParams) {
         const { url, headers, userAgent, proxyOption, target, groupPath } = downloadVideoParams;
         const axiosConfig = {
-            headers: headers || { "User-Agent": userAgent },
+            headers: {
+                ...(headers || {}),
+                "User-Agent": userAgent,
+                "Accept-Encoding": "identity",
+                "Accept": "*/*",
+                "Connection": "keep-alive"
+            },
             responseType: "stream",
+            decompress: false,
             ...proxyOption
         };
 

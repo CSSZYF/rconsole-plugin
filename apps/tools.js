@@ -30,7 +30,7 @@ import {
     TWITTER_BEARER_TOKEN,
     XHS_NO_WATERMARK_HEADER
 } from "../constants/constant.js";
-import { REDIS_YUNZAI_RESOLVE_CONTROLLER, RESOLVE_CONTROLLER_NAME_ENUM } from "../constants/resolve.js";
+import { REDIS_YUNZAI_GROUP_RESOLVE_PREFIX, REDIS_YUNZAI_RESOLVE_CONTROLLER, RESOLVE_CONTROLLER_NAME_ENUM } from "../constants/resolve.js";
 import {
     ANIME_SERIES_SEARCH_LINK,
     ANIME_SERIES_SEARCH_LINK2,
@@ -394,6 +394,71 @@ export class tools extends plugin {
         this.xiaoheiheCookie = this.toolsConfig.xiaoheiheCookie;
     }
 
+    /**
+     * 检查是否启用指定平台的解析功能
+     * @param {string} platformName - 平台名称 (如: "抖音", "哔哩哔哩", "小黑盒")
+     * @returns {Promise<boolean>} - true表示允许解析，false表示应拦截
+     */
+    /**
+     * 检查是否启用指定平台的解析功能
+     * @param {string} platformName - 平台名称 (如: "抖音", "哔哩哔哩", "小黑盒")
+     * @param {Object} [e] - 消息事件对象（可选，如果不传则使用this.e）
+     * @returns {Promise<boolean>} - true表示允许解析，false表示应拦截
+     */
+    async isEnableResolve(platformName, e) {
+        // 优先使用传入的e，否则尝试使用this.e
+        const eventObj = e || this.e;
+
+        // 如果无法获取事件对象，或者是在非消息上下文中调用，默认允许解析
+        if (!eventObj) {
+            return true;
+        }
+
+        // 从 RESOLVE_CONTROLLER_NAME_ENUM 中找到对应的 key
+        let platformKey = null;
+        for (const [key, name] of Object.entries(RESOLVE_CONTROLLER_NAME_ENUM)) {
+            if (name === platformName) {
+                platformKey = key;
+                break;
+            }
+        }
+
+        // 如果找不到对应的 key，默认允许解析
+        if (!platformKey) {
+            logger.warn(`[R插件][解析权限] 未找到平台配置: ${platformName}`);
+            return true;
+        }
+
+        // 临时解析模式，绕过权限检查
+        if (eventObj.isTempParse) {
+            return true;
+        }
+
+        // 非群聊消息，直接通过
+        if (!eventObj.isGroup) {
+            return true;
+        }
+
+        const groupId = eventObj.group_id;
+        const groupResolveKey = `${REDIS_YUNZAI_GROUP_RESOLVE_PREFIX}${groupId}`;
+        const groupConfig = await redisGetKey(groupResolveKey) || { enableAll: true, disabled: [] };
+
+        // 全局关闭
+        if (groupConfig.enableAll === false) {
+            logger.info(`[R插件][全局解析控制] 群${groupId}已全局关闭解析，拦截${platformName}`);
+            return false;
+        }
+
+        // 检查是否在禁用列表中
+        if (Array.isArray(groupConfig.disabled) && groupConfig.disabled.includes(platformKey)) {
+            logger.info(`[R插件][全局解析控制] ${platformName} 已拦截`);
+            return false;
+        }
+
+        return true;
+    }
+
+
     // 翻译插件
     async trans(e) {
         const languageReg = /翻(.)/s;
@@ -461,9 +526,8 @@ export class tools extends plugin {
     // 抖音解析
     async douyin(e) {
         // 切面判断是否需要解析
-        if (!(await this.isEnableResolve(RESOLVE_CONTROLLER_NAME_ENUM.douyin))) {
-            logger.info(`[R插件][全局解析控制] ${RESOLVE_CONTROLLER_NAME_ENUM.douyin} 已拦截`);
-            return false;
+        if (!(await this.isEnableResolve(RESOLVE_CONTROLLER_NAME_ENUM.douyin, e))) {
+            return true;
         }
         const urlRex = /(http:\/\/|https:\/\/)((v|live).douyin.com\/[A-Za-z\d._?%&+\-=\/#]*|www.douyin.com\/[A-Za-z\d._?%&+\-=\/#]+)/;
         // 检测无效链接，例如：v.douyin.com，静默忽略
@@ -1149,9 +1213,8 @@ export class tools extends plugin {
     // tiktok解析
     async tiktok(e) {
         // 切面判断是否需要解析
-        if (!(await this.isEnableResolve(RESOLVE_CONTROLLER_NAME_ENUM.tiktok))) {
-            logger.info(`[R插件][全局解析控制] ${RESOLVE_CONTROLLER_NAME_ENUM.tiktok} 已拦截`);
-            return false;
+        if (!(await this.isEnableResolve(RESOLVE_CONTROLLER_NAME_ENUM.tiktok, e))) {
+            return true;
         }
         // 判断海外
         const isOversea = await this.isOverseasServer();
@@ -1262,9 +1325,8 @@ export class tools extends plugin {
     // B站解析
     async bili(e) {
         // 切面判断是否需要解析
-        if (!(await this.isEnableResolve(RESOLVE_CONTROLLER_NAME_ENUM.bili))) {
-            logger.info(`[R插件][全局解析控制] ${RESOLVE_CONTROLLER_NAME_ENUM.bili} 已拦截`);
-            return false;
+        if (!(await this.isEnableResolve(RESOLVE_CONTROLLER_NAME_ENUM.bili, e))) {
+            return true;
         }
         const urlRex = /(?:https?:\/\/)?www\.bilibili\.com\/[A-Za-z\d._?%&+\-=\/#]*/g;
         const bShortRex = /(http:|https:)\/\/(b23.tv|bili2233.cn)\/[A-Za-z\d._?%&+\-=\/#]*/g;
@@ -2054,9 +2116,8 @@ export class tools extends plugin {
     // 使用现有api解析小蓝鸟
     async twitter_x(e) {
         // 切面判断是否需要解析
-        if (!(await this.isEnableResolve(RESOLVE_CONTROLLER_NAME_ENUM.twitter_x))) {
-            logger.info(`[R插件][全局解析控制] ${RESOLVE_CONTROLLER_NAME_ENUM.twitter_x} 已拦截`);
-            return false;
+        if (!(await this.isEnableResolve(RESOLVE_CONTROLLER_NAME_ENUM.twitter_x, e))) {
+            return true;
         }
         if (!(await this.isTrustUser(e.user_id))) {
             e.reply("你没有权限使用此命令");
@@ -2124,9 +2185,8 @@ export class tools extends plugin {
     // acfun解析
     async acfun(e) {
         // 切面判断是否需要解析
-        if (!(await this.isEnableResolve(RESOLVE_CONTROLLER_NAME_ENUM.acfun))) {
-            logger.info(`[R插件][全局解析控制] ${RESOLVE_CONTROLLER_NAME_ENUM.acfun} 已拦截`);
-            return false;
+        if (!(await this.isEnableResolve(RESOLVE_CONTROLLER_NAME_ENUM.acfun, e))) {
+            return true;
         }
         const path = `${this.getCurDownloadPath(e)}/temp/`;
         await mkdirIfNotExists(path);
@@ -2156,9 +2216,8 @@ export class tools extends plugin {
     // 小红书解析
     async xhs(e) {
         // 切面判断是否需要解析
-        if (!(await this.isEnableResolve(RESOLVE_CONTROLLER_NAME_ENUM.xhs))) {
-            logger.info(`[R插件][全局解析控制] ${RESOLVE_CONTROLLER_NAME_ENUM.xhs} 已拦截`);
-            return false;
+        if (!(await this.isEnableResolve(RESOLVE_CONTROLLER_NAME_ENUM.xhs, e))) {
+            return true;
         }
         // 正则说明：匹配手机链接、匹配小程序、匹配PC链接
         let msgUrl =
@@ -2290,9 +2349,8 @@ export class tools extends plugin {
     // 波点音乐解析
     async bodianMusic(e) {
         // 切面判断是否需要解析
-        if (!(await this.isEnableResolve(RESOLVE_CONTROLLER_NAME_ENUM.bodianMusic))) {
-            logger.info(`[R插件][全局解析控制] ${RESOLVE_CONTROLLER_NAME_ENUM.bodianMusic} 已拦截`);
-            return false;
+        if (!(await this.isEnableResolve(RESOLVE_CONTROLLER_NAME_ENUM.bodianMusic, e))) {
+            return true;
         }
         // 音频例子：https://h5app.kuwo.cn/m/bodian/playMusic.html?uid=3216773&musicId=192015898&opusId=&extendType=together
         // 视频例子：https://h5app.kuwo.cn/m/bodian/play.html?uid=3216773&mvId=118987&opusId=770096&extendType=together
@@ -2502,9 +2560,8 @@ export class tools extends plugin {
     // 网易云解析
     async netease(e) {
         // 切面判断是否需要解析
-        if (!(await this.isEnableResolve(RESOLVE_CONTROLLER_NAME_ENUM.netease))) {
-            logger.info(`[R插件][全局解析控制] ${RESOLVE_CONTROLLER_NAME_ENUM.netease} 已拦截`);
-            return false;
+        if (!(await this.isEnableResolve(RESOLVE_CONTROLLER_NAME_ENUM.netease, e))) {
+            return true;
         }
         let message =
             e.msg === undefined ? e.message.shift().data.replaceAll("\\", "") : e.msg.trim();
@@ -2831,9 +2888,8 @@ export class tools extends plugin {
 
     // 微博解析
     async weibo(e) {
-        if (!(await this.isEnableResolve(RESOLVE_CONTROLLER_NAME_ENUM.weibo))) {
-            logger.info(`[R插件][全局解析控制] ${RESOLVE_CONTROLLER_NAME_ENUM.weibo} 已拦截`);
-            return false;
+        if (!(await this.isEnableResolve(RESOLVE_CONTROLLER_NAME_ENUM.weibo, e))) {
+            return true;
         }
 
         const weiboUrl = e.msg === undefined ? e.message.shift().data.replaceAll("\\", "") : e.msg.trim().replaceAll("\\", "");
@@ -2965,9 +3021,8 @@ export class tools extends plugin {
      */
     async general(e) {
         // 切面判断是否需要解析
-        if (!(await this.isEnableResolve(RESOLVE_CONTROLLER_NAME_ENUM.general))) {
-            logger.info(`[R插件][全局解析控制] ${RESOLVE_CONTROLLER_NAME_ENUM.general} 已拦截`);
-            return false;
+        if (!(await this.isEnableResolve(RESOLVE_CONTROLLER_NAME_ENUM.general, e))) {
+            return true;
         }
         try {
             const adapter = await GeneralLinkAdapter.create(e.msg);
@@ -3140,9 +3195,8 @@ export class tools extends plugin {
     // 油管解析
     async sy2b(e) {
         // 切面判断是否需要解析
-        if (!(await this.isEnableResolve(RESOLVE_CONTROLLER_NAME_ENUM.sy2b))) {
-            logger.info(`[R插件][全局解析控制] ${RESOLVE_CONTROLLER_NAME_ENUM.sy2b} 已拦截`);
-            return false;
+        if (!(await this.isEnableResolve(RESOLVE_CONTROLLER_NAME_ENUM.sy2b, e))) {
+            return true;
         }
         const timeRange = ytbFormatTime(this.youtubeClipTime);
         const isOversea = await this.isOverseasServer();
@@ -3230,9 +3284,8 @@ export class tools extends plugin {
     // 米游社
     async miyoushe(e) {
         // 切面判断是否需要解析
-        if (!(await this.isEnableResolve(RESOLVE_CONTROLLER_NAME_ENUM.miyoushe))) {
-            logger.info(`[R插件][全局解析控制] ${RESOLVE_CONTROLLER_NAME_ENUM.miyoushe} 已拦截`);
-            return false;
+        if (!(await this.isEnableResolve(RESOLVE_CONTROLLER_NAME_ENUM.miyoushe, e))) {
+            return true;
         }
         let url = e.msg === undefined ? e.message.shift().data.replaceAll("\\", "") : e.msg.trim();
         let msg = /(?:https?:\/\/)?(m|www)\.miyoushe\.com\/[A-Za-z\d._?%&+\-=\/#]*/.exec(url)?.[0];
@@ -3310,9 +3363,8 @@ export class tools extends plugin {
     // 微视
     async weishi(e) {
         // 切面判断是否需要解析
-        if (!(await this.isEnableResolve(RESOLVE_CONTROLLER_NAME_ENUM.weishi))) {
-            logger.info(`[R插件][全局解析控制] ${RESOLVE_CONTROLLER_NAME_ENUM.weishi} 已拦截`);
-            return false;
+        if (!(await this.isEnableResolve(RESOLVE_CONTROLLER_NAME_ENUM.weishi, e))) {
+            return true;
         }
         let url = e.msg;
         const urlRegex = /https?:\/\/video\.weishi\.qq\.com\/\S+/g;
@@ -3362,9 +3414,8 @@ export class tools extends plugin {
 
     async zuiyou(e) {
         // 切面判断是否需要解析
-        if (!(await this.isEnableResolve(RESOLVE_CONTROLLER_NAME_ENUM.zuiyou))) {
-            logger.info(`[R插件][全局解析控制] ${RESOLVE_CONTROLLER_NAME_ENUM.zuiyou} 已拦截`);
-            return false;
+        if (!(await this.isEnableResolve(RESOLVE_CONTROLLER_NAME_ENUM.zuiyou, e))) {
+            return true;
         }
         // #最右#分享一条有趣的内容给你，不好看算我输。请戳链接>>https://share.xiaochuankeji.cn/hybrid/share/post?pid=365367131&zy_to=applink&share_count=1&m=dc114ccc8e55492642f6a702b510c1f6&d=9e18ca2dace030af656baea96321e0ea353fe5c46097a7f3962b93f995641e962796dd5faa231feea5531ac65547045f&app=zuiyou&recommend=r0&name=n0&title_type=t0
         let msg = e.msg === undefined ? e.message.shift().data.replaceAll("\\", "") : e.msg.trim();
@@ -3437,9 +3488,8 @@ export class tools extends plugin {
 
     async freyr(e) {
         // 切面判断是否需要解析
-        if (!(await this.isEnableResolve(RESOLVE_CONTROLLER_NAME_ENUM.freyr))) {
-            logger.info(`[R插件][全局解析控制] ${RESOLVE_CONTROLLER_NAME_ENUM.freyr} 已拦截`);
-            return false;
+        if (!(await this.isEnableResolve(RESOLVE_CONTROLLER_NAME_ENUM.freyr, e))) {
+            return true;
         }
         // https://music.apple.com/cn/album/hectopascal-from-yagate-kimi-ni-naru-piano-arrangement/1468323115?i=1468323724
         // 过滤参数
@@ -3527,9 +3577,8 @@ export class tools extends plugin {
 
     // 链接总结
     async linkShareSummary(e) {
-        if (!(await this.isEnableResolve(RESOLVE_CONTROLLER_NAME_ENUM.linkShareSummary))) {
-            logger.info(`[R插件][全局解析控制] ${RESOLVE_CONTROLLER_NAME_ENUM.linkShareSummary} 已拦截`);
-            return false;
+        if (!(await this.isEnableResolve(RESOLVE_CONTROLLER_NAME_ENUM.linkShareSummary, e))) {
+            return true;
         }
 
         let name, summaryLink;
@@ -3665,9 +3714,8 @@ export class tools extends plugin {
     // q q m u s i c 解析
     async qqMusic(e) {
         // 切面判断是否需要解析
-        if (!(await this.isEnableResolve(RESOLVE_CONTROLLER_NAME_ENUM.qqMusic))) {
-            logger.info(`[R插件][全局解析控制] ${RESOLVE_CONTROLLER_NAME_ENUM.qqMusic} 已拦截`);
-            return false;
+        if (!(await this.isEnableResolve(RESOLVE_CONTROLLER_NAME_ENUM.qqMusic, e))) {
+            return true;
         }
         // case1:　Taylor Swift/Bleachers《Anti-Hero (Feat. Bleachers) (Explicit)》 https://c6.y.qq.com/base/fcgi-bin/u?__=lg19lFgQerbo @QQ音乐
         /** case 2:
@@ -3721,9 +3769,8 @@ export class tools extends plugin {
     // 汽水音乐
     async qishuiMusic(e) {
         // 切面判断是否需要解析
-        if (!(await this.isEnableResolve(RESOLVE_CONTROLLER_NAME_ENUM.qishuiMusic))) {
-            logger.info(`[R插件][全局解析控制] ${RESOLVE_CONTROLLER_NAME_ENUM.qishuiMusic} 已拦截`);
-            return false;
+        if (!(await this.isEnableResolve(RESOLVE_CONTROLLER_NAME_ENUM.qishuiMusic, e))) {
+            return true;
         }
         const normalRegex = /^(.*?)\s*https?:\/\//;
         const musicInfo = normalRegex.exec(e.msg)?.[1].trim().replace("@汽水音乐", "");
@@ -3748,9 +3795,8 @@ export class tools extends plugin {
     // 小飞机下载
     async aircraft(e) {
         // 切面判断是否需要解析
-        if (!(await this.isEnableResolve(RESOLVE_CONTROLLER_NAME_ENUM.aircraft))) {
-            logger.info(`[R插件][全局解析控制] ${RESOLVE_CONTROLLER_NAME_ENUM.aircraft} 已拦截`);
-            return false;
+        if (!(await this.isEnableResolve(RESOLVE_CONTROLLER_NAME_ENUM.aircraft, e))) {
+            return true;
         }
         if (!(await this.isTrustUser(e.user_id))) {
             e.reply("你没有权限使用此命令");
@@ -3819,9 +3865,8 @@ export class tools extends plugin {
     // 贴吧
     async tieba(e) {
         // 切面判断是否需要解析
-        if (!(await this.isEnableResolve(RESOLVE_CONTROLLER_NAME_ENUM.tieba))) {
-            logger.info(`[R插件][全局解析控制] ${RESOLVE_CONTROLLER_NAME_ENUM.tieba} 已拦截`);
-            return false;
+        if (!(await this.isEnableResolve(RESOLVE_CONTROLLER_NAME_ENUM.tieba, e))) {
+            return true;
         }
         // 提取链接和ID
         const msg = /https:\/\/tieba\.baidu\.com\/p\/[A-Za-z0-9]+/.exec(e.msg)?.[0];
@@ -3909,9 +3954,8 @@ export class tools extends plugin {
     // 小黑盒
     async xiaoheihe(e) {
         // 切面判断是否需要解析
-        if (!(await this.isEnableResolve(RESOLVE_CONTROLLER_NAME_ENUM.xiaoheihe))) {
-            logger.info(`[R插件][全局解析控制] ${RESOLVE_CONTROLLER_NAME_ENUM.xiaoheihe} 已拦截`);
-            return false;
+        if (!(await this.isEnableResolve(RESOLVE_CONTROLLER_NAME_ENUM.xiaoheihe, e))) {
+            return true;
         }
 
         const msg = e.msg;
@@ -5234,50 +5278,7 @@ export class tools extends plugin {
      * @param resolveName
      * @returns {Promise<boolean>}
      */
-    async isEnableResolve(resolveName) {
-        // 0. 临时解析请求优先放行
-        if (this.e?.isTempParse) {
-            return true;
-        }
 
-        // 1. 群级别解析控制（优先级最高）
-        const groupId = this.e?.group_id;
-        if (groupId) {
-            try {
-                const { REDIS_YUNZAI_GROUP_RESOLVE_PREFIX } = await import('../constants/resolve.js');
-                const groupResolveKey = `${REDIS_YUNZAI_GROUP_RESOLVE_PREFIX}${groupId}`;
-                const groupConfig = await redisGetKey(groupResolveKey);
-
-                if (groupConfig) {
-                    // 如果全局关闭，则拦截所有解析
-                    if (groupConfig.enableAll === false) {
-                        logger.info(`[R插件][群解析控制] 群${groupId}已全局关闭解析，拦截${resolveName}`);
-                        return false;
-                    }
-
-                    // 检查是否在群禁用列表中
-                    if (Array.isArray(groupConfig.disabled) && groupConfig.disabled.includes(resolveName)) {
-                        logger.info(`[R插件][群解析控制] 群${groupId}已禁用${resolveName}解析`);
-                        return false;
-                    }
-                }
-            } catch (err) {
-                logger.error(`[R插件][群解析控制] 检查群配置时发生错误: ${err.message}`);
-                // 出错时继续执行，不影响解析功能
-            }
-        }
-
-        // 2. 全局黑名单控制（优先级较低）
-        const controller = this.globalBlackList;
-        // 如果不存在，那么直接放行
-        if (controller == null) {
-            return true;
-        }
-        // 找到禁用列表中是否包含 `resolveName`
-        const foundItem = controller.find(item => item === resolveName);
-        // 如果 undefined 说明不在禁用列表就放行
-        return foundItem === undefined;
-    }
 
     /**
      * 判断是否是海外服务器

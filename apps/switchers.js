@@ -206,6 +206,11 @@ export class switchers extends plugin {
      * @param e
      * @returns {Promise<void>}
      */
+    /**
+     * 查询当前群解析状态
+     * @param e
+     * @returns {Promise<void>}
+     */
     async getGroupResolveStatus(e) {
         try {
             if (!e.isGroup) {
@@ -219,14 +224,25 @@ export class switchers extends plugin {
 
             // 构建状态信息
             let statusMsg = `【群${groupId}解析状态】\n`;
-            statusMsg += `全局开关: ${groupConfig.enableAll === false ? '❌ 已关闭' : '✅ 已开启'}\n`;
-            statusMsg += `\n各解析功能状态:\n`;
 
-            // 遍历所有解析功能
-            for (const [key, name] of Object.entries(RESOLVE_CONTROLLER_NAME_ENUM)) {
-                const isDisabled = Array.isArray(groupConfig.disabled) && groupConfig.disabled.includes(key);
-                const status = groupConfig.enableAll === false ? '❌ 全局关闭' : (isDisabled ? '❌ 已禁用' : '✅ 已启用');
-                statusMsg += `${name}(${key}): ${status}\n`;
+            // 全局关闭
+            if (groupConfig.enableAll === false) {
+                statusMsg += `❌ 全局解析已关闭`;
+                e.reply(statusMsg);
+                return;
+            }
+
+            // 全局开启
+            statusMsg += `全局开关: ✅ 已开启\n`;
+
+            // 检查是否有禁用的平台
+            if (Array.isArray(groupConfig.disabled) && groupConfig.disabled.length > 0) {
+                statusMsg += `\n❌ 已禁用的平台 (${groupConfig.disabled.length}个):\n`;
+                groupConfig.disabled.forEach(key => {
+                    statusMsg += `  • ${RESOLVE_CONTROLLER_NAME_ENUM[key] || key}\n`;
+                });
+            } else {
+                statusMsg += `\n✅ 所有解析功能均已启用`;
             }
 
             e.reply(statusMsg);
@@ -307,7 +323,13 @@ export class switchers extends plugin {
             }
 
             // 获取当前配置
-            const groupConfig = await redisGetKey(groupResolveKey) || { enableAll: true, disabled: [] };
+            let groupConfig = await redisGetKey(groupResolveKey) || { enableAll: true, disabled: [] };
+
+            // 迁移旧数据
+            if (groupConfig.enableAll === false) {
+                groupConfig.enableAll = true;
+                groupConfig.disabled = Object.keys(RESOLVE_CONTROLLER_NAME_ENUM);
+            }
 
             // 确保 disabled 是数组
             if (!Array.isArray(groupConfig.disabled)) {
@@ -388,13 +410,20 @@ export class switchers extends plugin {
 
             // 如果没有参数，关闭所有解析
             if (resolveNames.length === 0) {
-                await redisSetKey(groupResolveKey, { enableAll: false, disabled: [] });
+                const allKeys = Object.keys(RESOLVE_CONTROLLER_NAME_ENUM);
+                await redisSetKey(groupResolveKey, { enableAll: true, disabled: allKeys });
                 e.reply(`❌ 已关闭群${groupId}的所有解析功能`);
                 return;
             }
 
             // 获取当前配置
-            const groupConfig = await redisGetKey(groupResolveKey) || { enableAll: true, disabled: [] };
+            let groupConfig = await redisGetKey(groupResolveKey) || { enableAll: true, disabled: [] };
+
+            // 迁移旧数据
+            if (groupConfig.enableAll === false) {
+                groupConfig.enableAll = true;
+                groupConfig.disabled = Object.keys(RESOLVE_CONTROLLER_NAME_ENUM);
+            }
 
             // 确保 disabled 是数组
             if (!Array.isArray(groupConfig.disabled)) {

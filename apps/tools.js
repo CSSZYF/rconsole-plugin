@@ -4616,11 +4616,12 @@ export class tools extends plugin {
                 // 发送合并后的转发消息（使用分批发送）
                 await sendImagesInBatches(e, forwardMessages, this.imageBatchThreshold);
 
-                // 发送游戏视频
+                // 发送游戏视频（小黑盒视频为m3u8格式，直接用ffmpeg下载）
                 const video = data.screenshots?.find(m => m.type === 'movie');
                 if (video) {
                     if (video.url) {
-                        const videoPath = await this.downloadVideo(video.url, false, null, this.videoDownloadConcurrency, 'xiaoheihe.mp4');
+                        const groupPath = `${this.defaultPath}${this.e.group_id || this.e.user_id}`;
+                        const videoPath = await downloadM3u8Video(video.url, groupPath, 'xiaoheihe.mp4', 5);
                         this.sendVideoToUpload(e, videoPath);
                     }
                 }

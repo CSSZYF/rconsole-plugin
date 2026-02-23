@@ -2988,7 +2988,7 @@ export class tools extends plugin {
                         const commentMsgs = comments.map(c => ({
                             message: `${c.text}\n${c.like}👍 · ${c.time}${c.source ? ' ' + c.source : ''}`,
                             nickname: c.user,
-                            user_id: c.uid || e.user_id
+                            user_id: 1 || e.user_id
                         }));
                         await e.reply(await Bot.makeForwardMsg(commentMsgs));
                     }
@@ -3098,7 +3098,7 @@ export class tools extends plugin {
                         return {
                             message: { type: 'text', text: msgText },
                             nickname: userName,
-                            user_id: comment.user?.id || e.user_id
+                            user_id: 1 || e.user_id
                         };
                     });
 
@@ -4384,7 +4384,7 @@ export class tools extends plugin {
                             commentForwardMsgs.push({
                                 message: commentContent,
                                 nickname: comment.user.username,
-                                user_id: comment.userid,
+                                user_id: 1 || e.user_id,
                             });
                             processedCommentCount++;
                         }

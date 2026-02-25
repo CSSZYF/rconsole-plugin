@@ -434,6 +434,12 @@ export class tools extends plugin {
             return true;
         }
 
+        // 检查全局解析黑名单（配置文件中的勾选项）
+        if (Array.isArray(this.globalBlackList) && this.globalBlackList.includes(platformName)) {
+            logger.info(`[R插件][全局解析黑名单] ${platformName} 已被全局禁用，拦截`);
+            return false;
+        }
+
         // 非群聊消息，直接通过
         if (!eventObj.isGroup) {
             return true;

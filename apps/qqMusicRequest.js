@@ -23,6 +23,10 @@ export class qqMusicRequest extends plugin {
                 {
                     reg: "^#(qq|QQ)播放\\s*(.+?)(?:\\s+([12]))?$",
                     fnc: "qqPlaySong"
+                },
+                {
+                    reg: ".*y\\.qq\\.com\\/n\\/ryqq\\/songDetail\\/([a-zA-Z0-9]+).*|.*CQ:json.*QQ音乐.*",
+                    fnc: "qqParseUrl"
                 }
             ]
         });
@@ -89,8 +93,8 @@ export class qqMusicRequest extends plugin {
                         'id': info.mid,
                         'songName': info.name || info.title,
                         'singerName': info.singer?.[0]?.name,
-                        'duration': formatTime(info.interval),
-                        'cover': `http://y.gtimg.cn/music/photo_new/T002R300x300M000${info.album?.mid}.jpg`,
+                        'duration': formatTime(info.interval || info.time_public || 0),
+                        'cover': info.album?.mid ? `http://y.gtimg.cn/music/photo_new/T002R300x300M000${info.album.mid}.jpg` : 'https://y.qq.com/favicon.ico',
                         'type': 'qqmusic',
                         'raw': info
                     });
@@ -148,8 +152,8 @@ export class qqMusicRequest extends plugin {
                     'id': info.mid,
                     'songName': info.name || info.title,
                     'singerName': info.singer?.[0]?.name,
-                    'duration': formatTime(info.interval),
-                    'cover': `http://y.gtimg.cn/music/photo_new/T002R300x300M000${info.album?.mid}.jpg`,
+                    'duration': formatTime(info.interval || info.time_public || 0),
+                    'cover': info.album?.mid ? `http://y.gtimg.cn/music/photo_new/T002R300x300M000${info.album.mid}.jpg` : 'https://y.qq.com/favicon.ico',
                     'type': 'qqmusic',
                     'raw': info
                 });
@@ -158,6 +162,70 @@ export class qqMusicRequest extends plugin {
                 e.reply('暂未找到你想听的歌哦~')
             }
         }
+    }
+
+    async qqParseUrl(e) {
+        if (!this.useQQMusicSongRequest) return false;
+
+        let songmid = '';
+        let title = '';
+
+        // 尝试匹配纯 URL
+        let matchUrl = e.msg.match(/y\.qq\.com\/n\/ryqq\/songDetail\/([a-zA-Z0-9]+)/);
+        if (matchUrl && matchUrl[1]) {
+            songmid = matchUrl[1];
+        } else if (e.msg.includes('CQ:json') && e.msg.includes('QQ音乐')) {
+            // 尝试从分享卡片中提取
+            try {
+                let jsonStrMatch = e.msg.match(/data=({.*})\]/);
+                if (jsonStrMatch && jsonStrMatch[1]) {
+                    // 解析转义
+                    let cleanStr = jsonStrMatch[1].replace(/&#44;/g, ',').replace(/&amp;/g, '&').replace(/&#91;/g, '[').replace(/&#93;/g, ']');
+                    let data = JSON.parse(cleanStr);
+                    let jumpUrl = data.meta?.music?.jumpUrl || '';
+                    title = data.meta?.music?.title || '';
+                    let m = jumpUrl.match(/songDetail\/([a-zA-Z0-9]+)/);
+                    if (m) songmid = m[1];
+                }
+            } catch (err) {
+                logger.error('解析QQ音乐卡片JSON失败', err);
+            }
+        }
+
+        if (!songmid) return false;
+
+        // 尝试搜索来补全 rawInfo （借用标题如果存在，如果不存在直接搜 songmid 试试）
+        let query = title ? `${title}` : songmid;
+        let res = await qqmusic_search(query, 1, 30, this.qqmusicCookie);
+        let rawInfo = null;
+
+        if (res && res.data && res.data.length > 0) {
+            // 精确比对 songmid
+            rawInfo = res.data.find(s => s.mid === songmid);
+            if (!rawInfo) {
+                // 如果库中找不到完全匹配 mid 的，可能是一个外网版本或者被下架等，拿第一个结果兜底
+                rawInfo = res.data[0];
+            }
+        }
+
+        if (!rawInfo) {
+            e.reply("解析QQ音乐失败：搜索接口未能提供该歌曲的数据。");
+            return true;
+        }
+
+        let songInfo = [{
+            'id': rawInfo.mid,
+            'songName': rawInfo.name || rawInfo.title,
+            'singerName': rawInfo.singer?.[0]?.name,
+            'duration': formatTime(rawInfo.interval || rawInfo.time_public || 0),
+            'cover': rawInfo.album?.mid ? `http://y.gtimg.cn/music/photo_new/T002R300x300M000${rawInfo.album.mid}.jpg` : 'https://y.qq.com/favicon.ico',
+            'type': 'qqmusic',
+            'raw': rawInfo
+        }];
+
+        // 自动触发点取第一首播放
+        this.qqMusicPlay(e, rawInfo, songInfo, 0);
+        return true;
     }
 
     async qqMusicPlay(e, rawInfo, songInfo, pickNumber = 0) {

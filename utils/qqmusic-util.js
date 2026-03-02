@@ -59,10 +59,38 @@ export async function qqmusic_search(search, page = 1, page_size = 10, cookie = 
         if (res.code != '0') {
             return null;
         }
-        let body = res.search?.data?.body || {};
-        return { page: page, data: body.song?.list || body.item_song || [] };
     } catch (err) {
         console.error(err);
+    }
+    return null;
+}
+
+/**
+ * 通过 mid 获取 QQ 音乐详细信息
+ * @param {string} mid 歌曲 mid
+ * @returns {Promise<Object>} 返回歌曲基本信息
+ */
+export async function qqmusic_song_detail(mid) {
+    try {
+        let req = {
+            "comm": { "ct": 24, "cv": 10000 },
+            "songinfo": {
+                "method": "get_song_detail_yqq",
+                "module": "music.pf_song_detail_svr",
+                "param": { "song_mid": mid, "song_type": 0 }
+            }
+        };
+
+        let response = await axios.post("https://u.y.qq.com/cgi-bin/musicu.fcg", req, {
+            headers: { 'Content-Type': 'application/json' }
+        });
+
+        let res = response.data;
+        if (res.songinfo && res.songinfo.code === 0 && res.songinfo.data && res.songinfo.data.track_info) {
+            return res.songinfo.data.track_info;
+        }
+    } catch (err) {
+        console.error("qqmusic_song_detail error:", err);
     }
     return null;
 }

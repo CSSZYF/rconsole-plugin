@@ -6,7 +6,8 @@ import { downloadAudio } from "../utils/common.js";
 import { redisGetKey, redisSetKey } from "../utils/redis-util.js";
 import { checkAndRemoveFile } from "../utils/file.js";
 import { sendCustomMusicCard } from "../utils/yunzai-util.js";
-import { qqmusic_search, getQQMusicUrl } from "../utils/qqmusic-util.js";
+import { qqmusic_search, getQQMusicUrl, qqmusic_song_detail } from "../utils/qqmusic-util.js";
+import commonModels from "../../../lib/plugins/plugin.js";
 import config from "../model/config.js";
 
 export class qqMusicRequest extends plugin {
@@ -25,7 +26,7 @@ export class qqMusicRequest extends plugin {
                     fnc: "qqPlaySong"
                 },
                 {
-                    reg: ".*y\\.qq\\.com\\/n\\/ryqq\\/songDetail\\/([a-zA-Z0-9]+).*|.*CQ:json.*QQ音乐.*",
+                    reg: ".*y\\.qq\\.com\\/n\\/ryqq.*\\/songDetail\\/([a-zA-Z0-9]+).*|.*CQ:json.*QQ音乐.*",
                     fnc: "qqParseUrl"
                 }
             ]
@@ -164,20 +165,50 @@ export class qqMusicRequest extends plugin {
         }
     }
 
+    // 检查黑名单
+    async _checkGlobalBlacklist(e) {
+        let blacklistConfig = config.getConfig("resolve");
+        // 是否开启全局解析
+        let useGlobalResolve = blacklistConfig.useGlobalResolve;
+        if (!useGlobalResolve) return false;
+
+        // 获取开关黑名单
+        let globalSwithBlacklist = blacklistConfig.globalResolveSwithBlackList || [];
+        // 获取黑名单解析正则
+        let globalResolveBlacklistRegexObject = blacklistConfig.globalResolveBlackList || {};
+
+        // 检查全局开关黑名单是否包含该群
+        if (e.isGroup && globalSwithBlacklist.includes(e.group_id)) {
+            logger.info('[R插件]此群已被列入全局解析黑名单，已取消解析请求');
+            return false;
+        }
+
+        // 检查该群是否在此项解析独立黑名单中
+        if (e.isGroup && globalResolveBlacklistRegexObject["qqMusicRequest"]?.includes(e.group_id)) {
+            logger.info(`[R插件]此群已被列入qqMusicRequest独立解析黑名单，已取消解析请求`);
+            return false;
+        }
+        return true;
+    }
+
     async qqParseUrl(e) {
         if (!this.useQQMusicSongRequest) return false;
+
+        let shouldResolve = await this._checkGlobalBlacklist(e);
+        if (!shouldResolve) return false;
 
         let songmid = '';
         let title = '';
 
-        // 尝试匹配纯 URL
-        let matchUrl = e.msg.match(/y\.qq\.com\/n\/ryqq\/songDetail\/([a-zA-Z0-9]+)/);
+        // 尝试匹配纯 URL (支持 ryqq 和 ryqq_v2 等)
+        let matchUrl = e.msg.match(/y\.qq\.com\/n\/ryqq.*\/songDetail\/([a-zA-Z0-9]+)/);
         if (matchUrl && matchUrl[1]) {
             songmid = matchUrl[1];
         } else if (e.msg.includes('CQ:json') && e.msg.includes('QQ音乐')) {
             // 尝试从分享卡片中提取
             try {
-                let jsonStrMatch = e.msg.match(/data=({.*})\]/);
+                // 更严谨地提取 data= 之后的花括号内容
+                let jsonStrMatch = e.msg.match(/data=({.+?})\]/);
                 if (jsonStrMatch && jsonStrMatch[1]) {
                     // 解析转义
                     let cleanStr = jsonStrMatch[1].replace(/&#44;/g, ',').replace(/&amp;/g, '&').replace(/&#91;/g, '[').replace(/&#93;/g, ']');
@@ -194,22 +225,23 @@ export class qqMusicRequest extends plugin {
 
         if (!songmid) return false;
 
-        // 尝试搜索来补全 rawInfo （借用标题如果存在，如果不存在直接搜 songmid 试试）
-        let query = title ? `${title}` : songmid;
-        let res = await qqmusic_search(query, 1, 30, this.qqmusicCookie);
         let rawInfo = null;
 
-        if (res && res.data && res.data.length > 0) {
-            // 精确比对 songmid
-            rawInfo = res.data.find(s => s.mid === songmid);
-            if (!rawInfo) {
-                // 如果库中找不到完全匹配 mid 的，可能是一个外网版本或者被下架等，拿第一个结果兜底
-                rawInfo = res.data[0];
+        // 优先使用直接获取详情的接口
+        rawInfo = await qqmusic_song_detail(songmid);
+
+        // 如果获取详情接口失败，再尝试搜索接口兜底
+        if (!rawInfo) {
+            let query = title ? `${title}` : songmid;
+            let res = await qqmusic_search(query, 1, 30, this.qqmusicCookie);
+            if (res && res.data && res.data.length > 0) {
+                rawInfo = res.data.find(s => s.mid === songmid);
+                if (!rawInfo) rawInfo = res.data[0];
             }
         }
 
         if (!rawInfo) {
-            e.reply("解析QQ音乐失败：搜索接口未能提供该歌曲的数据。");
+            logger.info("解析QQ音乐失败：搜索接口及详情抓取均未能提供该歌曲的数据。");
             return true;
         }
 

@@ -296,7 +296,6 @@ export class songRequest extends plugin {
         }
     }
 
-
     // 获取云盘信息
     async myCloud(e) {
         const autoSelectNeteaseApi = await this.pickApi()

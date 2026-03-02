@@ -1,6 +1,6 @@
 import _ from "lodash";
 import path from "path";
-import { BILI_CDN_SELECT_LIST, BILI_DEFAULT_CDN_LIST, BILI_DOWNLOAD_METHOD, BILI_RESOLUTION_LIST, VIDEO_CODEC_LIST, YOUTUBE_GRAPHICS_LIST, NETEASECLOUD_QUALITY_LIST, DOUYIN_BGM_SEND_TYPE } from "./constants/constant.js";
+import { BILI_CDN_SELECT_LIST, BILI_DEFAULT_CDN_LIST, BILI_DOWNLOAD_METHOD, BILI_RESOLUTION_LIST, VIDEO_CODEC_LIST, YOUTUBE_GRAPHICS_LIST, NETEASECLOUD_QUALITY_LIST, DOUYIN_BGM_SEND_TYPE, QQMUSIC_QUALITY_LIST } from "./constants/constant.js";
 import { RESOLVE_CONTROLLER_NAME_ENUM } from "./constants/resolve.js";
 import model from "./model/config.js";
 
@@ -582,6 +582,49 @@ export function supportGuoba() {
                     component: "Select",
                     componentProps: {
                         options: NETEASECLOUD_QUALITY_LIST,
+                    }
+                },
+
+                // ==================== QQ音乐 ====================
+                {
+                    label: 'QQ音乐',
+                    component: 'SOFT_GROUP_BEGIN'
+                },
+                {
+                    component: "Divider",
+                    label: "QQ音乐配置",
+                    componentProps: {
+                        orientation: "left",
+                        plain: true,
+                    },
+                },
+                {
+                    field: "tools.useQQMusicSongRequest",
+                    label: "开启QQ音乐点歌功能",
+                    bottomHelpMessage:
+                        "默认开启",
+                    component: "Switch",
+                    required: false,
+                },
+                {
+                    field: "tools.qqmusicCookie",
+                    label: "QQ音乐Cookie",
+                    bottomHelpMessage:
+                        "在QQ音乐官网获取，包含 uin, qm_keyst, wxuin 等",
+                    component: "Input",
+                    required: false,
+                    componentProps: {
+                        placeholder: "填写以使用vip账号登陆获取VIP无损音质解析",
+                    },
+                },
+                {
+                    field: "tools.qqmusicAudioQuality",
+                    label: "QQ音乐解析最高音质",
+                    bottomHelpMessage:
+                        "优先获取此音质，若获取不到则自动向下兼容（例如设置无损如果这首歌没有无损会自动返回320k）。需要有 VIP 的 CK。",
+                    component: "Select",
+                    componentProps: {
+                        options: QQMUSIC_QUALITY_LIST,
                     }
                 },
 

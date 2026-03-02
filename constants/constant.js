@@ -243,6 +243,15 @@ export const NETEASECLOUD_QUALITY_LIST = Object.freeze([
     { label: '杜比全景声(不推荐)', value: 'dolby' },
     { label: '超清母带', value: 'jymaster' },
 ]);
+
+export const QQMUSIC_QUALITY_LIST = Object.freeze([
+    { label: '无损 (FLAC)', value: 'size_flac' },
+    { label: '高品质 (320kbps MP3)', value: 'size_320mp3' },
+    { label: '中品质 (192kbps OGG)', value: 'size_192ogg' },
+    { label: '标准 (128kbps MP3)', value: 'size_128mp3' },
+    { label: '流畅 (96kbps AAC)', value: 'size_96aac' }
+]);
+
 /**
  * 消息撤回时间
  * @type {number}

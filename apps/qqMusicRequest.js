@@ -165,37 +165,8 @@ export class qqMusicRequest extends plugin {
         }
     }
 
-    // 检查黑名单
-    async _checkGlobalBlacklist(e) {
-        let blacklistConfig = config.getConfig("resolve");
-        // 是否开启全局解析
-        let useGlobalResolve = blacklistConfig.useGlobalResolve;
-        if (!useGlobalResolve) return false;
-
-        // 获取开关黑名单
-        let globalSwithBlacklist = blacklistConfig.globalResolveSwithBlackList || [];
-        // 获取黑名单解析正则
-        let globalResolveBlacklistRegexObject = blacklistConfig.globalResolveBlackList || {};
-
-        // 检查全局开关黑名单是否包含该群
-        if (e.isGroup && globalSwithBlacklist.includes(e.group_id)) {
-            logger.info('[R插件]此群已被列入全局解析黑名单，已取消解析请求');
-            return false;
-        }
-
-        // 检查该群是否在此项解析独立黑名单中
-        if (e.isGroup && globalResolveBlacklistRegexObject["qqMusicRequest"]?.includes(e.group_id)) {
-            logger.info(`[R插件]此群已被列入qqMusicRequest独立解析黑名单，已取消解析请求`);
-            return false;
-        }
-        return true;
-    }
-
     async qqParseUrl(e) {
         if (!this.useQQMusicSongRequest) return false;
-
-        let shouldResolve = await this._checkGlobalBlacklist(e);
-        if (!shouldResolve) return false;
 
         let songmid = '';
         let title = '';

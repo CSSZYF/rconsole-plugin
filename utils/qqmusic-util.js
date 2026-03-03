@@ -59,6 +59,8 @@ export async function qqmusic_search(search, page = 1, page_size = 10, cookie = 
         if (res.code != '0') {
             return null;
         }
+        let body = res.search?.data?.body || {};
+        return { page: page, data: body.song?.list || body.item_song || [] };
     } catch (err) {
         console.error(err);
     }

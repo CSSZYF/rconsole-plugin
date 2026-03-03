@@ -3742,53 +3742,13 @@ export class tools extends plugin {
         if (!(await this.isEnableResolve(RESOLVE_CONTROLLER_NAME_ENUM.qqMusic, e))) {
             return true;
         }
-        // case1:　Taylor Swift/Bleachers《Anti-Hero (Feat. Bleachers) (Explicit)》 https://c6.y.qq.com/base/fcgi-bin/u?__=lg19lFgQerbo @QQ音乐
-        /** case 2:
-         * {"app":"com.tencent.structmsg","config":{"ctime":1722497864,"forward":1,"token":"987908ab4a1c566d3645ef0ca52a162a","type":"normal"},"extra":{"app_type":1,"appid":100497308,"uin":542716863},"meta":{"news":{"action":"","android_pkg_name":"","app_type":1,"appid":100497308,"ctime":1722497864,"desc":"Taylor Swift/Bleachers","jumpUrl":"https://i.y.qq.com/v8/playsong.html?hosteuin=7KvA7i6sNeCi&sharefrom=gedan&from_id=1674373010&from_idtype=10014&from_name=(7rpl)&songid=382775503&songmid=&type=0&platform=1&appsongtype=1&_wv=1&source=qq&appshare=iphone&media_mid=000dKYJS3KCzpu&ADTAG=qfshare","preview":"https://pic.ugcimg.cn/1070bf5a6962b75263eee1404953c9b2/jpg1","source_icon":"https://p.qpic.cn/qqconnect/0/app_100497308_1626060999/100?max-age=2592000&t=0","source_url":"","tag":"QQ音乐","title":"Anti-Hero (Feat. Bleachers) (E…","uin":542716863}},"prompt":"[分享]Anti-Hero (Feat. Bleachers) (E…","ver":"0.0.0.1","view":"news"}
-         */
-        let musicInfo;
-        // applet判定
-        if (e.msg.includes(`"app":"com.tencent.music.lua"`) || e.msg.includes(`"app":"com.tencent.structmsg"`)) {
-            logger.info("[R插件][qqMusic] 识别为小程序分享");
-            const musicInfoJson = JSON.parse(e.msg);
-            // 歌手和歌名
-            const prompt = musicInfoJson.meta?.news?.title ?? musicInfoJson.meta?.music?.title;
-            const desc = musicInfoJson.meta?.news?.desc ?? musicInfoJson.meta?.music?.desc;
-            // 必要性拼接
-            musicInfo = prompt + "-" + desc;
-            // 空判定
-            if (musicInfo.trim() === "-" || prompt === undefined || desc === undefined) {
-                logger.info(`没有识别到QQ音乐小程序，帮助文档如下：${HELP_DOC}`);
-                return true;
-            }
-        } else {
-            // 连接判定
-            const normalRegex = /^(.*?)\s*https?:\/\//;
-            musicInfo = normalRegex.exec(e.msg)?.[1].trim();
-        }
-        // 删除特殊字符
-        musicInfo = cleanFilename(musicInfo);
-        // 判断音乐信息是否存在
-        if (!musicInfo) {
-            console.log('[R插件][qqMusic]: 暂不支持此类链接');
-            return true;
-        }
-        logger.info(`[R插件][qqMusic] 识别音乐为：${musicInfo}`);
-        // 使用临时接口下载
-        const url = await this.musicTempApi(e, musicInfo, "QQ音乐");
-        // 下载音乐
-        await downloadAudio(url, this.getCurDownloadPath(e), musicInfo, 'follow').then(async path => {
-            // 发送语音
-            if (this.isSendVocal) {
-                await e.reply(segment.record(path));
-            }
-            // 判断是不是icqq
-            await this.uploadGroupFile(e, path);
-            await checkAndRemoveFile(path);
-        }).catch(err => {
-            logger.error(`下载音乐失败，错误信息为: ${err.message}`);
-        });
-        return true;
+
+        // 动态引入 qqMusicRequest 类
+        const qqMusicRequestModule = await import('./qqMusicRequest.js');
+        const QqMusicRequestClass = qqMusicRequestModule.qqMusicRequest;
+
+        let reqApp = new QqMusicRequestClass();
+        return await reqApp.qqParseUrl(e);
     }
 
     // 汽水音乐

@@ -90,6 +90,23 @@ export function supportGuoba() {
                     },
                 },
                 {
+                    field: "tools.mergeCardMode",
+                    label: "合并卡片模式",
+                    bottomHelpMessage: "开启后将超过阈值的解析文字信息包裹到合并转发卡片中，减少聊天记录占用。封面图片会包含在卡片内，只有视频和语音独立发送",
+                    component: "Switch",
+                    required: false,
+                },
+                {
+                    field: "tools.mergeCardThreshold",
+                    label: "合并卡片触发字数",
+                    bottomHelpMessage: "文字内容超过此字数时才包裹为卡片，低于此字数正常发送（默认200字）",
+                    component: "InputNumber",
+                    required: false,
+                    componentProps: {
+                        placeholder: "请输入合并卡片触发字数（默认200）",
+                    },
+                },
+                {
                     field: "tools.identifyPrefix",
                     label: "识别前缀",
                     bottomHelpMessage: "识别前缀，比如你识别哔哩哔哩，那么就有：✅ 识别：哔哩哔哩",

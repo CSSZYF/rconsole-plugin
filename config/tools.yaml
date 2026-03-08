@@ -2,6 +2,9 @@ globalBlackList: [] # 全局黑名单解析
 
 globalImageLimit: 0 # 解析图片是否合并转发，默认合并
 
+mergeCardMode: false # 合并卡片模式：开启后将超过阈值的解析文字信息包裹到合并转发卡片中，减少聊天记录占用
+mergeCardThreshold: 200 # 合并卡片触发阈值：文字内容超过此字数时才包裹为卡片，低于此字数正常发送
+
 defaultPath: './data/rcmp4/' # 保存视频的位置
 videoSizeLimit: 70 # 视频大小限制（单位MB），超过大小则转换成群文件上传
 proxyAddr: '127.0.0.1' # 魔法地址

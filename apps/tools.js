@@ -874,27 +874,34 @@ export class tools extends plugin {
                     // 调用动图处理函数
                     await this.processDouyinImageAlbum(e, item, douUrl, headers, douId);
                 } else {
-                    // 普通图片
-                    e.reply(`${this.identifyPrefix}识别：抖音, ${item.desc}`);
+                    const identifyText = `${this.identifyPrefix}\u8bc6\u522b\uff1a\u6296\u97f3, ${item.desc}`;
 
                     // 提取无水印图片URL列表
                     const imageUrls = item.images.map(i => i.url_list[0]);
+                    const remoteImageList = imageUrls.map(url => ({
+                        message: segment.image(url),
+                        nickname: this.e.sender.card || this.e.user_id,
+                        user_id: this.e.user_id,
+                    }));
+                    const shouldMergeTextCard = this.mergeCardMode && identifyText.length >= this.mergeCardThreshold;
 
-                    // 根据 globalImageLimit 决定发送方式
-                    if (imageUrls.length > this.globalImageLimit) {
-                        // 超过限制 使用转发消息
-                        const remoteImageList = imageUrls.map(url => ({
-                            message: segment.image(url),
-                            nickname: this.e.sender.card || this.e.user_id,
-                            user_id: this.e.user_id,
-                        }));
+                    if (shouldMergeTextCard) {
+                        await sendImagesInBatches(e, [
+                            {
+                                message: identifyText,
+                                nickname: e.sender.card || e.user_id,
+                                user_id: e.user_id,
+                            },
+                            ...remoteImageList,
+                        ], this.imageBatchThreshold);
+                    } else if (imageUrls.length > this.globalImageLimit) {
+                        await this.replyWithCard(e, [identifyText]);
                         await sendImagesInBatches(e, remoteImageList, this.imageBatchThreshold);
                     } else {
-                        // 在限制内 直接发送图片
+                        await this.replyWithCard(e, [identifyText]);
                         const images = imageUrls.map(url => segment.image(url));
                         await e.reply(images);
                     }
-
                     // 发送背景音乐
                     await this.resolveDouyinMusic(e, item, douUrl);
 
